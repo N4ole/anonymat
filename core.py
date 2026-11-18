@@ -1,20 +1,21 @@
-"""Cœur du programme : détection des visages et anonymisation irréversible.
+"""Cœur du programme : détection des visages et anonymisation.
 
 Principes de sécurité :
-  * On ne « floute » jamais directement l'original : la zone est d'abord réduite
-    à une poignée de pixels (l'information du visage est DÉTRUITE), puis on
-    ajoute du bruit aléatoire. Un flou gaussien simple peut être en partie
-    inversé (déconvolution / IA), une zone écrasée à 6x6 pixels non.
-  * Le mode « caviardage » remplit la zone d'une couleur unie : 0 information.
-  * L'image est ré-encodée à partir des pixels : aucune métadonnée EXIF/XMP/IPTC
-    n'est recopiée (GPS, appareil, et surtout la MINIATURE EXIF qui contient
-    souvent l'image originale non floutée).
-  * Les zones sont élargies (cheveux, oreilles, menton) pour ne rien laisser.
+  * Méthodes « destructives » : la zone est d'abord réduite à une poignée de blocs
+    + bruit aléatoire (l'information du visage est DÉTRUITE). Un flou gaussien
+    classique, lui, peut être en partie inversé (déconvolution / IA).
+  * L'image est reconstruite à partir des pixels : aucune métadonnée (EXIF, GPS,
+    XMP, IPTC, miniature EXIF qui contient souvent l'original) n'est recopiée.
+  * Les zones sont élargies (cheveux, oreilles, menton) ; l'ellipse est agrandie
+    pour toujours couvrir entièrement le cadre du visage.
+  * Noms de sortie neutres par défaut (le nom d'origine contient souvent date/heure).
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
+import secrets
 import sys
 from dataclasses import dataclass
 
@@ -22,57 +23,106 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+try:  # photos iPhone (.heic)
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    HEIF_OK = True
+except Exception:  # pragma: no cover - dépend de l'installation
+    HEIF_OK = False
 
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff", ".gif"}
+if HEIF_OK:
+    IMAGE_EXTS |= {".heic", ".heif"}
+
+OUTPUT_FOLDER = "anonymise"
+NEUTRAL_PREFIX = "anonyme_"
+
+YUNET_FILE = "face_detection_yunet_2023mar.onnx"
+# Empreinte officielle (OpenCV Zoo / huggingface.co/opencv/face_detection_yunet)
+YUNET_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+
+# --------------------------------------------------------------------------- #
+#  Méthodes
+# --------------------------------------------------------------------------- #
+# clé -> (libellé, sûre par nature ?)
 MODES = {
-    "caviardage": "🔒 Caviardage (noir plein)",
-    "pixel": "🔒 Pixelisation destructive (+ bruit)",
-    "flou": "🔒 Flou destructif",
-    "pixel_classique": "⚠ Pixelisation classique",
+    "flou": "🔒 Flou (destructif)",
+    "rond_flou": "🔒 Rond flou",
+    "pixel": "🔒 Pixels (destructif)",
+    "emoji": "🔒 Émoji 🙂",
+    "noir": "🔒 Carré noir",
+    "pixel_classique": "⚠ Pixelisation classique (sans bruit)",
     "flou_classique": "⚠ Flou gaussien classique",
     "bandeau": "⛔ Bandeau sur les yeux",
 }
+SIMPLE_MODES = ["flou", "rond_flou", "pixel", "emoji", "noir"]
+SAFE_MODES = SIMPLE_MODES
+SIMPLE_STRENGTH = 0.75          # force utilisée en mode simple (toujours sûre)
 
-# Méthodes « destructives » : sous le seuil (nb de blocs en largeur) le visage
-# n'est plus identifiable. Au-dessus, on prévient l'utilisateur.
-SAFE_BLOCKS = 12     # <= 12 blocs sur la largeur de la zone : anonymat total
-WEAK_BLOCKS = 20     # 13-20 : reconnaissable par un proche / une IA
+SAFE_BLOCKS = 12   # <= 12 blocs sur la largeur de la zone : anonymat total
+WEAK_BLOCKS = 20   # 13-20 : reconnaissable par un proche / une IA
+MIN_SAFE_MARGIN = 0.10
+ELLIPSE_MARGIN = 0.30           # marge mini pour qu'une ellipse couvre tout le visage
+ROUND_MARGIN = 0.35             # idem avec bord adouci (rond flou)
+MANUAL_MARGIN = 0.10            # marge appliquée aux zones dessinées à la main
 
 
 def blocks_for(strength: float, lo: int = 64, hi: int = 3) -> int:
-    """Force 0 -> `lo` blocs (effet très léger), 1 -> `hi` blocs. Échelle logarithmique
-    pour que le curseur soit progressif sur toute sa course."""
+    """Force 0 -> `lo` blocs (très léger), 1 -> `hi` blocs. Échelle logarithmique."""
     s = min(1.0, max(0.0, strength))
     return max(hi, int(round(lo * (hi / lo) ** s)))
 
 
-def safety(mode: str, strength: float) -> tuple[str, str]:
-    """Renvoie (niveau, message) ; niveau ∈ ok | moyen | danger."""
-    if mode == "caviardage":
-        return "ok", "Anonymat total : aucune information du visage n'est conservée."
-    if mode in ("pixel", "flou"):
-        b = blocks_for(strength)
-        if b <= SAFE_BLOCKS:
-            return "ok", f"Anonymat total : visage réduit à {b} blocs, information détruite."
-        if b <= WEAK_BLOCKS:
-            return "moyen", f"Sous le seuil d'anonymat ({b} blocs) : un proche ou une IA peut reconnaître la personne."
-        return "danger", f"Effet léger ({b} blocs) : le visage reste reconnaissable."
-    if mode == "pixel_classique":
-        b = blocks_for(strength)
-        if b <= SAFE_BLOCKS:
-            return "moyen", f"Pixelisation sans bruit ({b} blocs) : correcte, mais des outils d'IA savent parfois retrouver l'identité."
-        return "danger", f"Pixelisation classique ({b} blocs) : visage reconnaissable / reconstructible par IA."
-    if mode == "flou_classique":
-        return "danger", "Flou gaussien : réversible en partie (déconvolution, IA), même fort. Ne protège pas vraiment."
-    if mode == "bandeau":
-        return "danger", "Bandeau sur les yeux : la personne reste facilement reconnaissable (bouche, nez, cheveux…)."
-    return "danger", ""
+def min_safe_strength() -> float:
+    """Plus petite force (au centième) qui donne l'anonymat total en mode destructif."""
+    for i in range(101):
+        if blocks_for(i / 100) <= SAFE_BLOCKS:
+            return i / 100
+    return 1.0
 
 
+def safety(mode: str, strength: float, margin: float = 0.3) -> tuple[str, str]:
+    """Renvoie (niveau, message clair) ; niveau ∈ ok | moyen | danger."""
+    b = blocks_for(strength)
+    if mode in ("noir", "emoji"):
+        level, msg = "ok", "Anonymat total : le visage est entièrement recouvert."
+    elif mode in ("pixel", "flou", "rond_flou"):
+        if b <= SAFE_BLOCKS:
+            level, msg = "ok", "Anonymat total : le visage est détruit, impossible de le retrouver."
+        elif b <= WEAK_BLOCKS:
+            level, msg = "moyen", ("Effet trop faible : un proche ou une IA pourrait reconnaître la personne. "
+                                   "Pousse le curseur « Force » vers la droite.")
+        else:
+            level, msg = "danger", "Effet léger : le visage reste reconnaissable. Pousse le curseur « Force » vers la droite."
+    elif mode == "pixel_classique":
+        if b <= SAFE_BLOCKS:
+            level, msg = "moyen", "Pixelisation classique : correcte, mais des outils d'IA savent parfois retrouver l'identité."
+        else:
+            level, msg = "danger", "Pixelisation classique légère : visage reconnaissable ou reconstructible par IA."
+    elif mode == "flou_classique":
+        level, msg = "danger", "Flou gaussien : peut être en partie annulé (logiciels, IA), même fort. Ne protège pas vraiment."
+    elif mode == "bandeau":
+        level, msg = "danger", "Bandeau sur les yeux : la personne reste facilement reconnaissable (bouche, nez, cheveux…)."
+    else:
+        return "danger", "Méthode inconnue."
+    if margin < MIN_SAFE_MARGIN and level == "ok" and mode != "bandeau":
+        level, msg = "moyen", "Marge trop faible : cheveux, oreilles ou menton peuvent dépasser. Augmente la marge."
+    return level, msg
+
+
+# --------------------------------------------------------------------------- #
+#  Utilitaires
+# --------------------------------------------------------------------------- #
 def resource_path(rel: str) -> str:
     """Chemin d'une ressource, que l'on soit en .py ou dans le .exe PyInstaller."""
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, rel)
+
+
+def read_bytes(path: str) -> bytes:
+    """Lecture via Python (gère les chemins accentués, contrairement à OpenCV sous Windows)."""
+    with open(path, "rb") as f:
+        return f.read()
 
 
 @dataclass
@@ -83,72 +133,269 @@ class Box:
     h: int
     score: float = 1.0
     manual: bool = False
+    kind: str = "visage"  # visage | objet
 
     def expanded(self, margin: float, img_w: int, img_h: int) -> "Box":
         """Agrandit la zone de `margin` (0.3 = +30 %) en restant dans l'image."""
         dx, dy_top, dy_bot = self.w * margin, self.h * margin * 1.3, self.h * margin
         x0 = max(0, int(self.x - dx))
         y0 = max(0, int(self.y - dy_top))  # plus de marge en haut (cheveux)
-        x1 = min(img_w, int(self.x + self.w + dx))
-        y1 = min(img_h, int(self.y + self.h + dy_bot))
-        return Box(x0, y0, x1 - x0, y1 - y0, self.score, self.manual)
+        x1 = min(img_w, int(round(self.x + self.w + dx)))
+        y1 = min(img_h, int(round(self.y + self.h + dy_bot)))
+        return Box(x0, y0, max(0, x1 - x0), max(0, y1 - y0), self.score, self.manual, self.kind)
+
+    def scaled(self, s: float) -> "Box":
+        return Box(int(self.x * s), int(self.y * s), max(1, int(round(self.w * s))),
+                   max(1, int(round(self.h * s))), self.score, self.manual, self.kind)
+
+    def contains(self, x: float, y: float) -> bool:
+        return self.x <= x <= self.x + self.w and self.y <= y <= self.y + self.h
+
+
+def effective_margin(box: Box, margin: float, shape: str, mode: str = "") -> float:
+    """Marge réellement appliquée : jamais < MANUAL_MARGIN pour une zone manuelle,
+    et agrandie pour qu'une ellipse recouvre entièrement le cadre du visage."""
+    m = max(margin, MANUAL_MARGIN) if box.manual else margin
+    if mode == "rond_flou":
+        m = max(m, ROUND_MARGIN)
+    elif shape == "ellipse" or mode == "emoji":
+        m = max(m, ELLIPSE_MARGIN)
+    return m
 
 
 # --------------------------------------------------------------------------- #
 #  Chargement / sauvegarde
 # --------------------------------------------------------------------------- #
-def load_image(path: str) -> np.ndarray:
-    """Charge une image en RGB en appliquant l'orientation EXIF (photos de tel)."""
+def _to_8bit(im: Image.Image) -> Image.Image:
+    """Images 16 bits / 32 bits / flottantes -> 8 bits (Pillow les sature sinon)."""
+    if im.mode in ("I;16", "I;16B", "I;16L", "I;16N", "I", "F"):
+        a = np.asarray(im, dtype=np.float64)
+        if im.mode.startswith("I;16"):
+            a = a / 257.0
+        elif a.size:
+            lo, hi = float(a.min()), float(a.max())
+            if hi > 255 or lo < 0:
+                a = (a - lo) / max(hi - lo, 1e-9) * 255.0
+        return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), "L")
+    return im
+
+
+def load_image_full(path: str, max_side: int | None = None) -> tuple[np.ndarray, np.ndarray | None]:
+    """Charge une image -> (RGB uint8, alpha uint8 ou None). Applique l'orientation EXIF.
+
+    `max_side` : réduction rapide (aperçu) - le décodage JPEG est alors accéléré.
+    """
     with Image.open(path) as im:
+        if max_side and im.format == "JPEG":
+            im.draft("RGB", (max_side, max_side))
+        im.seek(0)  # GIF / WebP animés : première image
         im = ImageOps.exif_transpose(im)
-        return np.array(im.convert("RGB"))
+        im = _to_8bit(im)
+        alpha = None
+        if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+            rgba = im.convert("RGBA")
+            alpha = np.array(rgba.getchannel("A"))
+            rgb = rgba.convert("RGB")
+        else:
+            rgb = im.convert("RGB")
+        if max_side and max(rgb.size) > max_side:
+            s = max_side / max(rgb.size)
+            size = (max(1, round(rgb.width * s)), max(1, round(rgb.height * s)))
+            rgb = rgb.resize(size, Image.BILINEAR)
+            if alpha is not None:
+                alpha = np.array(Image.fromarray(alpha).resize(size, Image.BILINEAR))
+        return np.array(rgb), alpha
 
 
-def save_clean(rgb: np.ndarray, path: str) -> None:
-    """Enregistre SANS aucune métadonnée (nouvelle image construite depuis les pixels)."""
-    clean = Image.fromarray(rgb, "RGB")
+def load_image(path: str) -> np.ndarray:
+    return load_image_full(path)[0]
+
+
+def image_size(path: str) -> tuple[int, int]:
+    """Taille (largeur, hauteur) après orientation EXIF, sans décoder l'image."""
+    with Image.open(path) as im:
+        w, h = im.size
+        try:
+            if im.getexif().get(0x0112) in (5, 6, 7, 8):
+                w, h = h, w
+        except Exception:
+            pass
+        return w, h
+
+
+FORMATS = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG", ".webp": "WEBP"}
+
+
+def output_ext(src: str) -> str:
+    ext = os.path.splitext(src)[1].lower()
+    if ext in (".jpg", ".jpeg", ".webp"):
+        return ext
+    if ext in (".heic", ".heif"):
+        return ".jpg"
+    return ".png"  # png, tif, bmp, gif -> png (sans perte)
+
+
+def save_clean(rgb: np.ndarray, path: str, alpha: np.ndarray | None = None) -> None:
+    """Enregistre SANS aucune métadonnée, de façon atomique (pas de fichier tronqué)."""
     ext = os.path.splitext(path)[1].lower()
-    if ext in (".jpg", ".jpeg"):
-        clean.save(path, "JPEG", quality=92, optimize=True)
-    elif ext == ".webp":
-        clean.save(path, "WEBP", quality=92)
+    fmt = FORMATS.get(ext, "PNG")
+    if alpha is not None and fmt in ("PNG", "WEBP"):
+        img = Image.fromarray(np.dstack([rgb, alpha]), "RGBA")
     else:
-        clean.save(path)
+        img = Image.fromarray(rgb, "RGB")
+    tmp = path + ".part"
+    try:
+        with open(tmp, "wb") as f:
+            if fmt == "JPEG":
+                img.save(f, fmt, quality=92, optimize=True)
+            elif fmt == "WEBP":
+                img.save(f, fmt, quality=92)
+            else:
+                img.save(f, fmt)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
-def output_path(src: str, out_dir: str | None = None) -> str:
-    folder = out_dir or os.path.join(os.path.dirname(src), "anonymise")
-    os.makedirs(folder, exist_ok=True)
-    name, ext = os.path.splitext(os.path.basename(src))
-    if ext.lower() in (".tif", ".tiff", ".bmp"):
-        ext = ".png"
-    return os.path.join(folder, f"{name}_anonyme{ext}")
+def plan_outputs(paths: list[str], out_dir: str | None = None, keep_names: bool = False) -> dict[str, str]:
+    """Calcule un chemin de sortie UNIQUE pour chaque image (jamais d'écrasement).
+
+    * keep_names=False (défaut) : noms neutres « anonyme_0001.jpg » (le nom d'origine
+      contient souvent la date/heure de prise de vue).
+    * keep_names=True : « photo_anonyme.jpg », avec suffixe _2, _3… en cas de doublon.
+    """
+    taken: set[str] = set()
+    counters: dict[str, int] = {}
+    plan: dict[str, str] = {}
+    for src in paths:
+        folder = out_dir or os.path.join(os.path.dirname(os.path.abspath(src)), OUTPUT_FOLDER)
+        ext = output_ext(src)
+        if keep_names:
+            stem = os.path.splitext(os.path.basename(src))[0] + "_anonyme"
+            cand, n = stem, 1
+            while True:
+                p = os.path.join(folder, cand + ext)
+                if os.path.normcase(p) not in taken and not os.path.exists(p):
+                    break
+                n += 1
+                cand = f"{stem}_{n}"
+        else:
+            key = os.path.normcase(folder)
+            if key not in counters:  # numéro le plus haut déjà présent, toutes extensions confondues
+                existing = os.listdir(folder) if os.path.isdir(folder) else []
+                nums = [int(f[len(NEUTRAL_PREFIX):len(NEUTRAL_PREFIX) + 4]) for f in existing
+                        if f.lower().startswith(NEUTRAL_PREFIX) and f[len(NEUTRAL_PREFIX):len(NEUTRAL_PREFIX) + 4].isdigit()]
+                counters[key] = max(nums, default=0)
+            n = counters[key]
+            while True:
+                n += 1
+                p = os.path.join(folder, f"{NEUTRAL_PREFIX}{n:04d}{ext}")
+                if os.path.normcase(p) not in taken and not os.path.exists(p):
+                    break
+            counters[key] = n
+        taken.add(os.path.normcase(p))
+        plan[src] = p
+    return plan
+
+
+def is_output_file(path: str) -> bool:
+    stem = os.path.splitext(os.path.basename(path))[0].lower()
+    return stem.startswith(NEUTRAL_PREFIX) or "_anonyme" in stem
+
+
+def list_images(folder: str, exclude_dirs: list[str] | None = None) -> list[str]:
+    """Images d'un dossier (récursif), sans réimporter les sorties du programme."""
+    excl = {os.path.normcase(os.path.abspath(d)) for d in (exclude_dirs or [])}
+    res = []
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if d.lower() != OUTPUT_FOLDER
+                   and os.path.normcase(os.path.abspath(os.path.join(root, d))) not in excl]
+        if os.path.normcase(os.path.abspath(root)) in excl:
+            continue
+        for f in sorted(files):
+            p = os.path.join(root, f)
+            if os.path.splitext(f)[1].lower() in IMAGE_EXTS and not is_output_file(p):
+                res.append(p)
+    return res
+
+
+def secure_delete(path: str) -> None:
+    """Écrase le fichier avec des données aléatoires, le renomme puis le supprime.
+
+    Limite : sur SSD, clé USB, disque synchronisé (OneDrive…) ou avec des sauvegardes,
+    des copies peuvent subsister ailleurs. C'est un « mieux que rien », pas une garantie.
+    """
+    size = os.path.getsize(path)
+    with open(path, "r+b", buffering=0) as f:
+        remaining = size
+        while remaining > 0:
+            chunk = min(remaining, 1 << 20)
+            f.write(secrets.token_bytes(chunk))
+            remaining -= chunk
+        f.flush()
+        os.fsync(f.fileno())
+    tmp = os.path.join(os.path.dirname(path), secrets.token_hex(8))
+    os.replace(path, tmp)
+    os.remove(tmp)
 
 
 # --------------------------------------------------------------------------- #
 #  Détection
 # --------------------------------------------------------------------------- #
+def load_cascade(path: str) -> cv2.CascadeClassifier:
+    """Charge une cascade Haar depuis la mémoire (OpenCV ne gère pas les chemins
+    accentués sous Windows : un nom d'utilisateur « Hélène » suffit à tout casser)."""
+    text = read_bytes(path).decode("utf-8")
+    fs = cv2.FileStorage(text, cv2.FILE_STORAGE_READ | cv2.FILE_STORAGE_MEMORY)
+    c = cv2.CascadeClassifier()
+    if not c.read(fs.getFirstTopLevelNode()) or c.empty():
+        raise RuntimeError(f"cascade illisible : {os.path.basename(path)}")
+    return c
+
+
 class FaceDetector:
-    """YuNet (réseau de neurones, précis) si le modèle est présent, sinon Haar."""
+    """YuNet (IA, précis) si le modèle est présent et intègre, sinon Haar (basique).
 
-    YUNET_FILE = "face_detection_yunet_2023mar.onnx"
+    backend ∈ "yunet" | "haar" | "aucun" ; `problems` liste ce qui n'a pas marché.
+    """
 
-    def __init__(self) -> None:
-        self.backend = "haar"
-        model = resource_path(os.path.join("models", self.YUNET_FILE))
+    def __init__(self, models_dir: str | None = None, haar_dir: str | None = None) -> None:
+        self.problems: list[str] = []
         self._yunet = None
-        if os.path.isfile(model) and os.path.getsize(model) > 100_000:
+        self._cascades: list[tuple[cv2.CascadeClassifier, bool]] = []
+
+        model = os.path.join(models_dir or resource_path("models"), YUNET_FILE)
+        if os.path.isfile(model):
             try:
-                self._yunet = cv2.FaceDetectorYN.create(model, "", (320, 320), 0.5, 0.3, 5000)
-                self.backend = "yunet"
-            except cv2.error:
+                data = read_bytes(model)
+                if hashlib.sha256(data).hexdigest() != YUNET_SHA256:
+                    raise RuntimeError("empreinte SHA-256 incorrecte (fichier corrompu ou modifié)")
+                buf = np.frombuffer(data, np.uint8)
+                self._yunet = cv2.FaceDetectorYN.create("onnx", buf, np.empty(0, np.uint8),
+                                                        (320, 320), 0.5, 0.3, 5000)
+            except Exception as exc:
+                self.problems.append(f"Modèle IA YuNet inutilisable : {exc}")
                 self._yunet = None
-        haar_dir = resource_path("haar")  # copie embarquée dans le .exe
-        if not os.path.isdir(haar_dir) and getattr(cv2, "data", None):
-            haar_dir = cv2.data.haarcascades
-        self._frontal = cv2.CascadeClassifier(os.path.join(haar_dir, "haarcascade_frontalface_default.xml"))
-        self._frontal2 = cv2.CascadeClassifier(os.path.join(haar_dir, "haarcascade_frontalface_alt2.xml"))
-        self._profile = cv2.CascadeClassifier(os.path.join(haar_dir, "haarcascade_profileface.xml"))
+        else:
+            self.problems.append("Modèle IA YuNet absent de ce programme.")
+
+        hd = haar_dir or resource_path("haar")
+        for name, profile in (("haarcascade_frontalface_default.xml", False),
+                              ("haarcascade_frontalface_alt2.xml", False),
+                              ("haarcascade_profileface.xml", True)):
+            try:
+                self._cascades.append((load_cascade(os.path.join(hd, name)), profile))
+            except Exception as exc:
+                self.problems.append(f"Détecteur Haar {name} : {exc}")
+
+        self.backend = "yunet" if self._yunet is not None else ("haar" if self._cascades else "aucun")
+
+    @property
+    def ok(self) -> bool:
+        return self.backend != "aucun"
 
     # -- YuNet, multi-échelle pour attraper petits ET grands visages ----------
     def _yunet_detect(self, rgb: np.ndarray, threshold: float) -> list[Box]:
@@ -157,10 +404,12 @@ class FaceDetector:
         self._yunet.setScoreThreshold(threshold)
         boxes: list[Box] = []
         long_side = max(h, w)
-        targets = sorted({min(long_side, t) for t in (640, 1280, 2560)})
-        for t in targets:
+        for t in sorted({min(long_side, t) for t in (640, 1280, 2560)}):
             s = t / long_side
-            img = cv2.resize(bgr, (max(1, int(w * s)), max(1, int(h * s))), interpolation=cv2.INTER_AREA) if s < 1 else bgr
+            img = bgr if s >= 1 else cv2.resize(bgr, (max(1, int(w * s)), max(1, int(h * s))),
+                                                interpolation=cv2.INTER_AREA)
+            if min(img.shape[:2]) < 10:
+                continue
             self._yunet.setInputSize((img.shape[1], img.shape[0]))
             _, faces = self._yunet.detect(img)
             if faces is None:
@@ -171,48 +420,49 @@ class FaceDetector:
         return boxes
 
     # -- Haar (secours), de face + de profil des deux côtés -------------------
-    def _haar_detect(self, rgb: np.ndarray, threshold: float) -> list[Box]:
+    def _haar_detect(self, rgb: np.ndarray, sensitivity: float) -> list[Box]:
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         h, w = gray.shape
         s = min(1.0, 1600 / max(h, w))
         if s < 1:
-            gray = cv2.resize(gray, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+            gray = cv2.resize(gray, (max(1, int(w * s)), max(1, int(h * s))), interpolation=cv2.INTER_AREA)
+        if min(gray.shape) < 20:
+            return []
         gray = cv2.equalizeHist(gray)
-        neighbors = max(2, int(round(2 + threshold * 6)))  # sensibilité -> minNeighbors
+        neighbors = max(2, int(round(2 + (1 - sensitivity) * 6)))
         boxes: list[Box] = []
-
-        def run(casc, img, flip=False):
-            if casc.empty():
-                return
-            for (x, y, fw, fh) in casc.detectMultiScale(img, 1.1, neighbors, minSize=(20, 20)):
-                if flip:
-                    x = img.shape[1] - x - fw
-                boxes.append(Box(int(x / s), int(y / s), int(fw / s), int(fh / s), 0.9))
-
-        run(self._frontal, gray)
-        run(self._frontal2, gray)
-        run(self._profile, gray)
-        run(self._profile, cv2.flip(gray, 1), flip=True)
+        for casc, profile in self._cascades:
+            imgs = [(gray, False)] + ([(cv2.flip(gray, 1), True)] if profile else [])
+            for img, flip in imgs:
+                for (x, y, fw, fh) in casc.detectMultiScale(img, 1.1, neighbors, minSize=(20, 20)):
+                    if flip:
+                        x = img.shape[1] - x - fw
+                    boxes.append(Box(int(x / s), int(y / s), int(fw / s), int(fh / s), 0.9))
         return boxes
 
     def detect(self, rgb: np.ndarray, sensitivity: float = 0.5) -> list[Box]:
         """sensitivity : 0 = prudent (peu de faux positifs) ... 1 = attrape tout."""
-        threshold = 0.85 - 0.6 * sensitivity  # 0.85 -> 0.25
         if self._yunet is not None:
-            boxes = self._yunet_detect(rgb, threshold)
+            boxes = self._yunet_detect(rgb, 0.85 - 0.6 * sensitivity)
+        elif self._cascades:
+            boxes = self._haar_detect(rgb, sensitivity)
         else:
-            boxes = self._haar_detect(rgb, 1 - sensitivity)
-        return merge_boxes(boxes)
+            boxes = []
+        H, W = rgb.shape[:2]
+        clipped = []
+        for b in boxes:
+            x0, y0 = max(0, b.x), max(0, b.y)
+            x1, y1 = min(W, b.x + b.w), min(H, b.y + b.h)
+            if x1 - x0 > 1 and y1 - y0 > 1:
+                clipped.append(Box(x0, y0, x1 - x0, y1 - y0, b.score))
+        return merge_boxes(clipped)
 
 
-def _iou_or_contained(a: Box, b: Box) -> float:
+def _overlap(a: Box, b: Box) -> float:
     x0, y0 = max(a.x, b.x), max(a.y, b.y)
     x1, y1 = min(a.x + a.w, b.x + b.w), min(a.y + a.h, b.y + b.h)
     inter = max(0, x1 - x0) * max(0, y1 - y0)
-    if inter == 0:
-        return 0.0
-    smaller = min(a.w * a.h, b.w * b.h)
-    return inter / smaller
+    return inter / max(1, min(a.w * a.h, b.w * b.h))
 
 
 def merge_boxes(boxes: list[Box], thr: float = 0.5) -> list[Box]:
@@ -220,10 +470,10 @@ def merge_boxes(boxes: list[Box], thr: float = 0.5) -> list[Box]:
     out: list[Box] = []
     for b in sorted(boxes, key=lambda b: -b.w * b.h):
         for i, o in enumerate(out):
-            if _iou_or_contained(b, o) > thr:
+            if _overlap(b, o) > thr:
                 x0, y0 = min(b.x, o.x), min(b.y, o.y)
                 x1, y1 = max(b.x + b.w, o.x + o.w), max(b.y + b.h, o.y + o.h)
-                out[i] = Box(x0, y0, x1 - x0, y1 - y0, max(b.score, o.score), o.manual or b.manual)
+                out[i] = Box(x0, y0, x1 - x0, y1 - y0, max(b.score, o.score))
                 break
         else:
             out.append(b)
@@ -234,77 +484,110 @@ def merge_boxes(boxes: list[Box], thr: float = 0.5) -> list[Box]:
 #  Anonymisation
 # --------------------------------------------------------------------------- #
 def _destroy(region: np.ndarray, blocks: int, rng: np.random.Generator, noise: int = 18) -> np.ndarray:
-    """Réduit la zone à `blocks` blocs de large (+ bruit aléatoire) : l'info d'origine est perdue."""
+    """Réduit la zone à `blocks` blocs de large (+ bruit) : l'info d'origine est perdue.
+    Même une zone minuscule est réduite au moins de moitié."""
     h, w = region.shape[:2]
-    bw = max(1, min(blocks, w))
-    bh = max(1, int(round(bw * h / max(w, 1))))
+    bw = max(1, min(blocks, w // 2 if w >= 2 else 1))
+    bh = max(1, min(int(round(bw * h / max(w, 1))), h // 2 if h >= 2 else 1))
     small = cv2.resize(region, (bw, bh), interpolation=cv2.INTER_AREA).astype(np.int16)
     if noise:
         small += rng.integers(-noise, noise + 1, small.shape, dtype=np.int16)
     return np.clip(small, 0, 255).astype(np.uint8)
 
 
-def anonymize(rgb: np.ndarray, boxes: list[Box], mode: str = "caviardage",
-              shape: str = "rectangle", margin: float = 0.25,
-              color: tuple[int, int, int] = (0, 0, 0), strength: float = 0.7) -> np.ndarray:
-    """strength : 0 = effet à peine visible ... 1 = effet maximal (voir `safety`)."""
+def _ellipse_mask(w: int, h: int, feather: float = 0.0) -> np.ndarray:
+    """Masque elliptique 0..1 ; `feather` = largeur du bord adouci (fraction)."""
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    nx = (xx + 0.5 - w / 2) / (w / 2)
+    ny = (yy + 0.5 - h / 2) / (h / 2)
+    d = np.sqrt(nx * nx + ny * ny)
+    if feather <= 0:
+        return (d <= 1.0).astype(np.float32)
+    return np.clip((1.0 - d) / feather, 0, 1).astype(np.float32)
+
+
+def _draw_emoji(w: int, h: int, region: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Dessine un smiley jaune (sans police : fonctionne partout)."""
+    S = 4  # sur-échantillonnage pour des bords lisses
+    W, H = w * S, h * S
+    img = region.copy()
+    img = cv2.resize(img, (W, H), interpolation=cv2.INTER_NEAREST)
+    cx, cy, rx, ry = W // 2, H // 2, W // 2, H // 2
+    lw = max(S, int(min(W, H) * 0.035))
+    cv2.ellipse(img, (cx, cy), (rx, ry), 0, 0, 360, (255, 204, 51), -1, cv2.LINE_AA)
+    cv2.ellipse(img, (cx, cy), (rx - lw // 2, ry - lw // 2), 0, 0, 360, (230, 160, 20), lw, cv2.LINE_AA)
+    ex, ey = int(rx * 0.36), int(ry * 0.28)
+    er = (max(S, int(rx * 0.11)), max(S, int(ry * 0.17)))
+    for sx in (-1, 1):
+        cv2.ellipse(img, (cx + sx * ex, cy - ey), er, 0, 0, 360, (60, 40, 20), -1, cv2.LINE_AA)
+    cv2.ellipse(img, (cx, cy + int(ry * 0.08)), (int(rx * 0.55), int(ry * 0.45)), 0, 20, 160,
+                (60, 40, 20), max(S, int(min(W, H) * 0.06)), cv2.LINE_AA)
+    img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+    return img, _ellipse_mask(w, h)
+
+
+def box_mode(b: Box, mode: str, shape: str) -> tuple[str, str]:
+    """Méthode et forme réellement appliquées à une zone."""
+    if b.kind == "objet" and mode == "emoji":  # un smiley sur une plaque n'a pas de sens
+        return "flou", "rectangle"
+    if mode in ("rond_flou", "emoji"):
+        return mode, "ellipse"
+    return mode, shape
+
+
+def anonymize(rgb: np.ndarray, boxes: list[Box], mode: str = "flou",
+              shape: str = "rectangle", margin: float = 0.3,
+              color: tuple[int, int, int] = (0, 0, 0), strength: float = 0.75) -> np.ndarray:
+    """Applique la méthode `mode` sur chaque zone. strength : 0 = léger ... 1 = maximal."""
+    if mode not in MODES:
+        raise ValueError(f"Méthode inconnue : {mode}")
     s = min(1.0, max(0.0, strength))
     out = rgb.copy()
     H, W = out.shape[:2]
     rng = np.random.default_rng()  # graine aléatoire : rien de reproductible
+    base_mode, base_shape = mode, shape
     for b in boxes:
-        e = b.expanded(0 if b.manual else margin, W, H)
-        if e.w < 2 or e.h < 2:
-            continue
-        region = out[e.y:e.y + e.h, e.x:e.x + e.w]
-        mask = None
-
-        if mode == "caviardage":
-            patch = np.empty_like(region)
-            patch[:] = color
-
-        elif mode in ("pixel", "pixel_classique"):
-            noise = int(8 + 22 * s) if mode == "pixel" else 0
-            small = _destroy(region, blocks_for(s), rng, noise)
-            patch = cv2.resize(small, (e.w, e.h), interpolation=cv2.INTER_NEAREST)
-
-        elif mode == "flou":  # on détruit d'abord, puis on lisse pour l'esthétique
-            small = _destroy(region, blocks_for(s), rng, int(8 + 22 * s))
-            patch = cv2.resize(small, (e.w, e.h), interpolation=cv2.INTER_CUBIC)
-            k = max(3, int(min(e.w, e.h) / blocks_for(s) * 1.5) | 1)
-            patch = cv2.GaussianBlur(patch, (k, k), 0)
-
-        elif mode == "flou_classique":  # flou gaussien simple (réversible en partie)
-            sigma = max(0.5, min(e.w, e.h) * (0.01 + 0.15 * s))
-            patch = cv2.GaussianBlur(region, (0, 0), sigma)
-
-        elif mode == "bandeau":  # bande noire sur les yeux (pas d'élargissement)
+        mode, shape = box_mode(b, base_mode, base_shape)
+        if mode == "bandeau" and b.kind == "visage":
             r = b.expanded(0, W, H)
             thick = max(2, int(r.h * (0.12 + 0.30 * s)))
             cy = r.y + int(r.h * 0.40)  # les yeux sont vers 40 % de la hauteur du visage
-            y0, y1 = max(0, cy - thick // 2), min(H, cy + thick // 2)
+            y0, y1 = max(0, cy - thick // 2), min(H, cy + (thick + 1) // 2)
             x0, x1 = max(0, r.x - int(r.w * 0.08)), min(W, r.x + r.w + int(r.w * 0.08))
             out[y0:y1, x0:x1] = color
             continue
 
-        else:
-            raise ValueError(f"Méthode inconnue : {mode}")
+        e = b.expanded(effective_margin(b, margin, shape, mode), W, H)
+        if e.w < 1 or e.h < 1:
+            continue
+        region = out[e.y:e.y + e.h, e.x:e.x + e.w]
+        alpha = None
 
-        if shape == "ellipse":
-            mask = np.zeros((e.h, e.w), np.uint8)
-            cv2.ellipse(mask, (e.w // 2, e.h // 2), (e.w // 2, e.h // 2), 0, 0, 360, 255, -1)
-            m = mask.astype(bool)
-            region[m] = patch[m]
-        else:
+        if mode == "noir" or (mode == "bandeau"):  # objets en mode bandeau : noir
+            patch = np.empty_like(region)
+            patch[:] = color
+        elif mode in ("pixel", "pixel_classique"):
+            noise = int(8 + 22 * s) if mode == "pixel" else 0
+            small = _destroy(region, blocks_for(s), rng, noise)
+            patch = cv2.resize(small, (e.w, e.h), interpolation=cv2.INTER_NEAREST)
+        elif mode in ("flou", "rond_flou"):  # on détruit d'abord, puis on lisse
+            small = _destroy(region, blocks_for(s), rng, int(8 + 22 * s))
+            patch = cv2.resize(small, (e.w, e.h), interpolation=cv2.INTER_CUBIC)
+            k = max(3, int(min(e.w, e.h) / max(1, blocks_for(s)) * 1.5) | 1)
+            patch = cv2.GaussianBlur(patch, (k, k), 0)
+            if mode == "rond_flou":
+                alpha = _ellipse_mask(e.w, e.h, feather=0.12)
+        elif mode == "flou_classique":
+            sigma = max(0.5, min(e.w, e.h) * (0.01 + 0.15 * s))
+            patch = cv2.GaussianBlur(region, (0, 0), sigma)
+        elif mode == "emoji":
+            patch, alpha = _draw_emoji(e.w, e.h, region)
+
+        if alpha is None and shape == "ellipse":
+            alpha = _ellipse_mask(e.w, e.h)
+        if alpha is None:
             region[:] = patch
+        else:
+            a = alpha[..., None]
+            region[:] = (patch * a + region * (1 - a)).round().astype(np.uint8)
     return out
-
-
-def list_images(folder: str) -> list[str]:
-    res = []
-    for root, dirs, files in os.walk(folder):
-        dirs[:] = [d for d in dirs if d != "anonymise"]
-        for f in sorted(files):
-            if os.path.splitext(f)[1].lower() in IMAGE_EXTS and not f.endswith(("_anonyme.jpg", "_anonyme.png")):
-                res.append(os.path.join(root, f))
-    return res

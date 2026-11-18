@@ -1,5 +1,4 @@
-# Compile le .exe sur un runner Windows de GitHub (pas besoin de Python en local).
-# Onglet Actions > "Build exe" > Run workflow, puis télécharger l'artefact.
+# Compile et teste le .exe sur Windows (onglet Actions > "Build exe" > Run workflow).
 name: Build exe
 on: [workflow_dispatch, push]
 jobs:
@@ -9,11 +8,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - name: Build
-        shell: cmd
+      - name: Dépendances
+        run: pip install -r requirements.txt
+      - name: Modèle IA (empreinte vérifiée, échec si absent)
+        run: python tools_model.py
+      - name: Tests
+        run: python -m pytest -q tests
+      - name: Compilation
+        run: pyinstaller --noconfirm AnonymiseurVisages.spec
+      - name: Auto-test du .exe depuis un dossier avec accents
+        shell: pwsh
         run: |
-          pip install -r requirements.txt
-          curl -L --fail -o models\face_detection_yunet_2023mar.onnx https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
-          pyinstaller --noconfirm --onefile --windowed --name AnonymiseurVisages --icon icon.ico --add-data "icon.ico;." --add-data "haar;haar" --add-data "models;models" --hidden-import PIL._tkinter_finder app.py
+          $d = "$env:RUNNER_TEMP\Dossier é à ü"
+          New-Item -ItemType Directory -Force $d | Out-Null
+          Copy-Item dist\AnonymiseurVisages.exe $d
+          $log = "$env:RUNNER_TEMP\selftest.txt"
+          $p = Start-Process -FilePath "$d\AnonymiseurVisages.exe" -ArgumentList "--selftest","--require-ai","--log",$log -Wait -PassThru
+          Get-Content $log
+          if ($p.ExitCode -ne 0) { throw "Auto-test en échec" }
       - uses: actions/upload-artifact@v4
         with: { name: AnonymiseurVisages, path: dist/AnonymiseurVisages.exe }
