@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
 import sys
 from dataclasses import dataclass
@@ -144,6 +145,15 @@ class Box:
         y1 = min(img_h, int(round(self.y + self.h + dy_bot)))
         return Box(x0, y0, max(0, x1 - x0), max(0, y1 - y0), self.score, self.manual, self.kind)
 
+    def raw_expanded(self, margin: float) -> tuple[int, int, int, int]:
+        """Comme `expanded`, mais SANS rogner aux bords de l'image (peut être négatif).
+        Indispensable pour qu'une ellipse garde sa vraie forme près d'un bord."""
+        x0 = int(np.floor(self.x - self.w * margin))
+        y0 = int(np.floor(self.y - self.h * margin * 1.3))
+        x1 = int(np.ceil(self.x + self.w + self.w * margin))
+        y1 = int(np.ceil(self.y + self.h + self.h * margin))
+        return x0, y0, max(x1, x0 + 1), max(y1, y0 + 1)
+
     def scaled(self, s: float) -> "Box":
         return Box(int(self.x * s), int(self.y * s), max(1, int(round(self.w * s))),
                    max(1, int(round(self.h * s))), self.score, self.manual, self.kind)
@@ -239,6 +249,11 @@ def save_clean(rgb: np.ndarray, path: str, alpha: np.ndarray | None = None) -> N
     """Enregistre SANS aucune métadonnée, de façon atomique (pas de fichier tronqué)."""
     ext = os.path.splitext(path)[1].lower()
     fmt = FORMATS.get(ext, "PNG")
+    if alpha is not None:
+        # Les couleurs sous les pixels 100 % transparents sont effacées : sinon un visage
+        # « gommé » par transparence réapparaît dès qu'on retire le canal alpha.
+        rgb = rgb.copy()
+        rgb[alpha == 0] = 0
     if alpha is not None and fmt in ("PNG", "WEBP"):
         img = Image.fromarray(np.dstack([rgb, alpha]), "RGBA")
     else:
@@ -301,25 +316,43 @@ def plan_outputs(paths: list[str], out_dir: str | None = None, keep_names: bool 
     return plan
 
 
+_OUTPUT_RE = re.compile(r"^(anonyme_\d{4}|.+_anonyme(_\d+)?)$", re.IGNORECASE)
+
+
 def is_output_file(path: str) -> bool:
-    stem = os.path.splitext(os.path.basename(path))[0].lower()
-    return stem.startswith(NEUTRAL_PREFIX) or "_anonyme" in stem
+    """Vrai uniquement pour les noms produits par ce programme :
+    « anonyme_0001 » ou « photo_anonyme » / « photo_anonyme_2 »."""
+    return bool(_OUTPUT_RE.match(os.path.splitext(os.path.basename(path))[0]))
 
 
-def list_images(folder: str, exclude_dirs: list[str] | None = None) -> list[str]:
-    """Images d'un dossier (récursif), sans réimporter les sorties du programme."""
+def scan_images(folder: str, exclude_dirs: list[str] | None = None) -> tuple[list[str], int]:
+    """Images d'un dossier (récursif) -> (fichiers, nb de sorties du programme ignorées)."""
     excl = {os.path.normcase(os.path.abspath(d)) for d in (exclude_dirs or [])}
-    res = []
+    res, skipped = [], 0
     for root, dirs, files in os.walk(folder):
-        dirs[:] = [d for d in dirs if d.lower() != OUTPUT_FOLDER
-                   and os.path.normcase(os.path.abspath(os.path.join(root, d))) not in excl]
+        kept = []
+        for d in dirs:
+            full = os.path.join(root, d)
+            if d.lower() == OUTPUT_FOLDER or os.path.normcase(os.path.abspath(full)) in excl:
+                skipped += sum(os.path.splitext(f)[1].lower() in IMAGE_EXTS
+                               for _, _, fs in os.walk(full) for f in fs)
+            else:
+                kept.append(d)
+        dirs[:] = kept
         if os.path.normcase(os.path.abspath(root)) in excl:
             continue
         for f in sorted(files):
             p = os.path.join(root, f)
-            if os.path.splitext(f)[1].lower() in IMAGE_EXTS and not is_output_file(p):
-                res.append(p)
-    return res
+            if os.path.splitext(f)[1].lower() in IMAGE_EXTS:
+                if is_output_file(p):
+                    skipped += 1
+                else:
+                    res.append(p)
+    return res, skipped
+
+
+def list_images(folder: str, exclude_dirs: list[str] | None = None) -> list[str]:
+    return scan_images(folder, exclude_dirs)[0]
 
 
 def secure_delete(path: str) -> None:
@@ -364,6 +397,7 @@ class FaceDetector:
 
     def __init__(self, models_dir: str | None = None, haar_dir: str | None = None) -> None:
         self.problems: list[str] = []
+        self.tampered = False  # modèle présent mais empreinte incorrecte : alerte forte
         self._yunet = None
         self._cascades: list[tuple[cv2.CascadeClassifier, bool]] = []
 
@@ -372,6 +406,7 @@ class FaceDetector:
             try:
                 data = read_bytes(model)
                 if hashlib.sha256(data).hexdigest() != YUNET_SHA256:
+                    self.tampered = True
                     raise RuntimeError("empreinte SHA-256 incorrecte (fichier corrompu ou modifié)")
                 buf = np.frombuffer(data, np.uint8)
                 self._yunet = cv2.FaceDetectorYN.create("onnx", buf, np.empty(0, np.uint8),
@@ -557,37 +592,46 @@ def anonymize(rgb: np.ndarray, boxes: list[Box], mode: str = "flou",
             out[y0:y1, x0:x1] = color
             continue
 
-        e = b.expanded(effective_margin(b, margin, shape, mode), W, H)
-        if e.w < 1 or e.h < 1:
+        # Zone complète (peut déborder de la photo) : la forme est calculée dessus,
+        # puis recadrée. Sinon une ellipse près d'un bord laisse le visage à découvert.
+        rx0, ry0, rx1, ry1 = b.raw_expanded(effective_margin(b, margin, shape, mode))
+        cx0, cy0, cx1, cy1 = max(0, rx0), max(0, ry0), min(W, rx1), min(H, ry1)
+        if cx1 - cx0 < 1 or cy1 - cy0 < 1:
             continue
-        region = out[e.y:e.y + e.h, e.x:e.x + e.w]
+        rw, rh = rx1 - rx0, ry1 - ry0
+        visible = out[cy0:cy1, cx0:cx1]
+        pad = (cy0 - ry0, ry1 - cy1, cx0 - rx0, rx1 - cx1)  # haut, bas, gauche, droite
+        region = cv2.copyMakeBorder(visible, *pad, cv2.BORDER_REPLICATE) if any(pad) else visible.copy()
         alpha = None
 
-        if mode == "noir" or (mode == "bandeau"):  # objets en mode bandeau : noir
+        if mode == "noir" or mode == "bandeau":  # objets en mode bandeau : noir
             patch = np.empty_like(region)
             patch[:] = color
         elif mode in ("pixel", "pixel_classique"):
             noise = int(8 + 22 * s) if mode == "pixel" else 0
             small = _destroy(region, blocks_for(s), rng, noise)
-            patch = cv2.resize(small, (e.w, e.h), interpolation=cv2.INTER_NEAREST)
+            patch = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
         elif mode in ("flou", "rond_flou"):  # on détruit d'abord, puis on lisse
             small = _destroy(region, blocks_for(s), rng, int(8 + 22 * s))
-            patch = cv2.resize(small, (e.w, e.h), interpolation=cv2.INTER_CUBIC)
-            k = max(3, int(min(e.w, e.h) / max(1, blocks_for(s)) * 1.5) | 1)
+            patch = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_CUBIC)
+            k = max(3, int(min(rw, rh) / max(1, blocks_for(s)) * 1.5) | 1)
             patch = cv2.GaussianBlur(patch, (k, k), 0)
             if mode == "rond_flou":
-                alpha = _ellipse_mask(e.w, e.h, feather=0.12)
+                alpha = _ellipse_mask(rw, rh, feather=0.12)
         elif mode == "flou_classique":
-            sigma = max(0.5, min(e.w, e.h) * (0.01 + 0.15 * s))
+            sigma = max(0.5, min(rw, rh) * (0.01 + 0.15 * s))
             patch = cv2.GaussianBlur(region, (0, 0), sigma)
-        elif mode == "emoji":
-            patch, alpha = _draw_emoji(e.w, e.h, region)
+        else:  # emoji
+            patch, alpha = _draw_emoji(rw, rh, region)
 
         if alpha is None and shape == "ellipse":
-            alpha = _ellipse_mask(e.w, e.h)
+            alpha = _ellipse_mask(rw, rh)
+        t, l = pad[0], pad[2]
+        vh, vw = visible.shape[:2]
+        patch = patch[t:t + vh, l:l + vw]
         if alpha is None:
-            region[:] = patch
+            visible[:] = patch
         else:
-            a = alpha[..., None]
-            region[:] = (patch * a + region * (1 - a)).round().astype(np.uint8)
+            a = alpha[t:t + vh, l:l + vw, None]
+            visible[:] = (patch * a + visible * (1 - a)).round().astype(np.uint8)
     return out

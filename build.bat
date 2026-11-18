@@ -32,9 +32,11 @@ echo [5/5] Compilation avec PyInstaller...
 pyinstaller --noconfirm --clean AnonymiseurVisages.spec || goto :err
 
 echo Auto-test du .exe...
+del "%TEMP%\anonymiseur_selftest.txt" 2>nul
 start /wait "" dist\AnonymiseurVisages.exe --selftest --log "%TEMP%\anonymiseur_selftest.txt"
 type "%TEMP%\anonymiseur_selftest.txt"
 echo.
+findstr /C:"RESULTAT=OK" "%TEMP%\anonymiseur_selftest.txt" >nul || (echo *** Auto-test en ECHEC *** & goto :err)
 echo === Termine : dist\AnonymiseurVisages.exe ===
 explorer dist
 exit /b 0

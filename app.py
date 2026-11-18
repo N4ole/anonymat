@@ -11,6 +11,7 @@ Auto-test (CI) : AnonymiseurVisages.exe --selftest [--require-ai] [--log fichier
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import subprocess
@@ -39,6 +40,29 @@ SIMPLE_LABELS = {
 SAFETY_COLORS = {"ok": ("#e6f6ea", "#1b7a34"), "moyen": ("#fff4dc", "#9a5b00"),
                  "danger": ("#fde8e7", "#b3261e")}
 SAFETY_ICONS = {"ok": "🔒", "moyen": "⚠", "danger": "⛔"}
+
+
+def config_path() -> str:
+    base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "AnonymiseurVisages", "reglages.json")
+
+
+def load_config() -> dict:
+    """Seuls des réglages sont mémorisés (jamais de nom de photo ni de dossier)."""
+    try:
+        with open(config_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(cfg: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(config_path()), exist_ok=True)
+        with open(config_path(), "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -81,6 +105,8 @@ class Item:
         self.state = "attente"  # attente | analyse | ok | erreur | fait
         self.error = ""
         self.reviewed = False
+        self.rejected: list[core.Box] = []  # faux positifs supprimés : ne reviennent pas
+        self.out_path: str | None = None     # dernière sortie (ré-export = remplacement)
 
     @property
     def n_faces(self) -> int:
@@ -106,7 +132,7 @@ class App(tk.Tk):
         super().__init__()
         self.title(APP_NAME)
         self.geometry("1240x820")
-        self.minsize(980, 640)
+        self.minsize(1000, 640)
         try:
             self.iconbitmap(core.resource_path("icon.ico"))
         except Exception:
@@ -127,6 +153,7 @@ class App(tk.Tk):
         self.cancel = False
         self.export_thread: threading.Thread | None = None
         self._sens_job = None
+        self.cfg = load_config()
 
         self.detector = core.FaceDetector()
         self.jobs: queue.Queue = queue.Queue()
@@ -137,7 +164,13 @@ class App(tk.Tk):
         self._on_mode()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(100, self._poll)
-        if not self.detector.ok:
+        if self.detector.tampered:
+            self.after(300, lambda: messagebox.showerror(
+                APP_NAME, "⛔ Le modèle de détection IA de ce programme a été MODIFIÉ ou est corrompu "
+                          "(empreinte de sécurité incorrecte).\n\nLe programme a peut-être été altéré : "
+                          "ne l'utilise pas pour des photos sensibles et retélécharge-le depuis une source sûre.\n\n"
+                          "En attendant, seule la détection basique est utilisée."))
+        elif not self.detector.ok:
             self.after(300, lambda: messagebox.showerror(
                 APP_NAME, "Aucun détecteur de visages n'a pu être chargé :\n\n"
                 + "\n".join(self.detector.problems)
@@ -157,18 +190,20 @@ class App(tk.Tk):
         # --- Barre du haut ---------------------------------------------------
         top = self.top = ttk.Frame(self, padding=(8, 8, 8, 4))
         top.pack(fill="x")
-        self.btn_add = ttk.Button(top, text="➕ Ajouter des photos…", command=self.pick_files)
+        self.btn_add = ttk.Button(top, text="➕ Photos…", command=self.pick_files)
         self.btn_add.pack(side="left")
-        self.btn_dir = ttk.Button(top, text="📁 Un dossier…", command=self.pick_folder)
+        self.btn_dir = ttk.Button(top, text="📁 Dossier…", command=self.pick_folder)
         self.btn_dir.pack(side="left", padx=4)
-        self.btn_clear = ttk.Button(top, text="🗑 Vider la liste", command=self.clear)
+        self.btn_clear = ttk.Button(top, text="🗑 Vider", command=self.clear)
         self.btn_clear.pack(side="left")
+        Tooltip(self.btn_clear, "Retire toutes les photos de la liste (les fichiers ne sont pas supprimés).")
+        Tooltip(self.btn_dir, "Ajouter toutes les photos d'un dossier (et de ses sous-dossiers).")
         Tooltip(self.btn_add, "Choisir une ou plusieurs photos. Tu peux aussi glisser des photos sur l'icône du programme.")
 
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
         ttk.Label(top, text="Style :").pack(side="left")
         self.mode = tk.StringVar()
-        self.mode_cb = ttk.Combobox(top, textvariable=self.mode, state="readonly", width=34)
+        self.mode_cb = ttk.Combobox(top, textvariable=self.mode, state="readonly", width=23)
         self.mode_cb.pack(side="left", padx=4)
         self.mode_cb.bind("<<ComboboxSelected>>", lambda e: self._on_mode())
         Tooltip(self.mode_cb, "Comment cacher les visages.\n🔒 = anonymat total\n⚠ / ⛔ = méthodes classiques, "
@@ -179,7 +214,7 @@ class App(tk.Tk):
         cbp.pack(side="left", padx=10)
         Tooltip(cbp, "Affiche la photo telle qu'elle sera enregistrée. Les cadres restent visibles par-dessus.")
 
-        self.advanced = tk.BooleanVar(value=False)
+        self.advanced = tk.BooleanVar(value=bool(self.cfg.get("advanced", False)))
         self.btn_adv = ttk.Checkbutton(top, text="⚙ Options avancées", variable=self.advanced,
                                        command=self._toggle_advanced)
         self.btn_adv.pack(side="right")
@@ -214,20 +249,23 @@ class App(tk.Tk):
         cbs.bind("<<ComboboxSelected>>", lambda e: self.redraw())
         Tooltip(cbs, "Ellipse : la zone est automatiquement agrandie pour recouvrir tout le visage.")
 
-        ttk.Label(r1, text="   Sensibilité :").pack(side="left")
+        r1b = ttk.Frame(self.adv)
+        r1b.pack(fill="x", pady=(4, 0))
+        ttk.Label(r1b, text="Sensibilité de détection :").pack(side="left")
         self.sens = tk.DoubleVar(value=0.6)
-        ss = ttk.Scale(r1, from_=0.0, to=1.0, variable=self.sens, length=110, command=lambda v: self._on_sens())
+        ss = ttk.Scale(r1b, from_=0.0, to=1.0, variable=self.sens, length=110, command=lambda v: self._on_sens())
         ss.pack(side="left", padx=4)
         Tooltip(ss, "À droite : trouve plus de visages, mais aussi plus de fausses détections.\n"
                     "La détection est relancée automatiquement (tes zones manuelles sont gardées).")
 
         r2 = ttk.Frame(self.adv)
         r2.pack(fill="x", pady=(4, 0))
-        self.safe_only = tk.BooleanVar(value=False)
+        self.safe_only = tk.BooleanVar(value=bool(self.cfg.get("safe_only", False)))
         c1 = ttk.Checkbutton(r2, text="🔒 Méthodes sûres uniquement (mode terrain)", variable=self.safe_only,
                              command=self._on_safe_only)
         c1.pack(side="left")
-        Tooltip(c1, "Masque les méthodes classiques et empêche de descendre sous le seuil d'anonymat total.")
+        Tooltip(c1, "Ne propose que les méthodes 🔒, bloque la force et la marge au-dessus du seuil d'anonymat, "
+                    "et refuse d'enregistrer si la détection IA n'est pas disponible. Réglage mémorisé.")
         self.keep_names = tk.BooleanVar(value=False)
         c2 = ttk.Checkbutton(r2, text="Garder les noms de fichiers d'origine", variable=self.keep_names)
         c2.pack(side="left", padx=12)
@@ -239,15 +277,19 @@ class App(tk.Tk):
         Tooltip(c3, "Écrase les photos d'origine avec des données aléatoires puis les supprime.\n"
                     "Limite : sur SSD, clé USB, OneDrive/Google Drive ou sauvegardes, des copies "
                     "peuvent subsister. Windows garde aussi des miniatures en cache.")
-        b = ttk.Button(r2, text="🔄 Relancer la détection", command=self.redetect_all)
-        b.pack(side="right")
+        b = ttk.Button(r1b, text="🔄 Relancer la détection", command=self.redetect_all)
+        b.pack(side="left", padx=8)
 
         # --- Bandeaux d'information --------------------------------------------
         self.engine_lbl = tk.Label(self, anchor="w", padx=10, pady=3, font=("Segoe UI", 9, "bold"))
         if self.detector.backend == "haar":
-            self.engine_lbl.configure(text="⚠ Détection basique (le modèle IA n'est pas dans ce programme) : "
-                                           "des visages risquent d'être ratés. Vérifie chaque photo très attentivement.",
-                                      bg="#fde8e7", fg="#b3261e")
+            if self.detector.tampered:
+                txt = ("⛔ Attention : le programme semble avoir été modifié (modèle IA refusé). "
+                       "Ne l'utilise pas pour des photos sensibles.")
+            else:
+                txt = ("⚠ Cette version n'a pas la détection intelligente : regarde bien chaque photo "
+                       "et ajoute les visages oubliés avec « ➕ Visage oublié ».")
+            self.engine_lbl.configure(text=txt, bg="#fde8e7", fg="#b3261e")
         elif self.detector.backend == "aucun":
             self.engine_lbl.configure(text="⛔ Aucune détection automatique : ajoute chaque visage à la main.",
                                       bg="#b3261e", fg="white")
@@ -270,12 +312,14 @@ class App(tk.Tk):
         sb.pack(side="left", fill="y")
         self.listbox.bind("<<ListboxSelect>>", self.on_select)
         self.listbox.bind("<Delete>", lambda e: (self.remove_selected(), "break")[1])
+        self.listbox.bind("<Left>", lambda e: (self.step(-1), "break")[1])
+        self.listbox.bind("<Right>", lambda e: (self.step(1, mark=True), "break")[1])
         body.add(left, weight=1)
 
         right = ttk.Frame(body)
         review = ttk.Frame(right, padding=(0, 0, 0, 4))
         review.pack(fill="x")
-        self.review_lbl = ttk.Label(review, text="", font=("Segoe UI", 10, "bold"))
+        self.review_lbl = ttk.Label(review, text="", font=("Segoe UI", 10, "bold"), wraplength=560)
         self.review_lbl.pack(side="left")
         self.btn_next = ttk.Button(review, text="Suivante ▶", command=lambda: self.step(1, mark=True))
         self.btn_next.pack(side="right")
@@ -287,12 +331,12 @@ class App(tk.Tk):
 
         tools = ttk.Frame(right, padding=(0, 4))
         tools.pack(fill="x")
-        self.btn_add_face = ttk.Button(tools, text="➕ Ajouter un visage oublié",
+        self.btn_add_face = ttk.Button(tools, text="➕ Visage oublié",
                                        command=lambda: self.set_draw("visage"))
         self.btn_add_face.pack(side="left")
         Tooltip(self.btn_add_face, "Clique ici, puis dessine un rectangle autour du visage sur la photo "
                                    "(maintiens le clic gauche et fais glisser).")
-        self.btn_add_obj = ttk.Button(tools, text="🏷 Cacher autre chose (badge, plaque…)",
+        self.btn_add_obj = ttk.Button(tools, text="🏷 Autre chose à cacher",
                                       command=lambda: self.set_draw("objet"))
         self.btn_add_obj.pack(side="left", padx=4)
         Tooltip(self.btn_add_obj, "Pour tout ce qui peut identifier quelqu'un : nom brodé, badge, "
@@ -301,9 +345,10 @@ class App(tk.Tk):
         self.btn_del.pack(side="left")
         Tooltip(self.btn_del, "Clique d'abord sur une zone pour la sélectionner (elle devient jaune), "
                               "puis sur ce bouton. Raccourcis : touche Suppr ou clic droit sur la zone.")
-        ttk.Button(tools, text="Tout effacer", command=self.clear_boxes).pack(side="right")
-        self.hint = ttk.Label(tools, text="", foreground="#0a5fb4")
-        self.hint.pack(side="left", padx=8)
+        bt = ttk.Button(tools, text="Enlever tous les cadres", command=self.clear_boxes)
+        bt.pack(side="right")
+        Tooltip(bt, "Enlève tous les cadres de CETTE photo (la photo elle-même n'est pas touchée).")
+        self.hint_text = ""
 
         body.add(right, weight=4)
 
@@ -313,10 +358,11 @@ class App(tk.Tk):
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.canvas.bind("<Button-3>", self.on_right)
         self.canvas.bind("<Button-2>", self.on_right)  # macOS
-        self.bind("<Delete>", lambda e: self.delete_selected_box())
+        self.canvas.bind("<Delete>", lambda e: self.delete_selected_box())
+        self.canvas.bind("<BackSpace>", lambda e: self.delete_selected_box())
+        self.canvas.bind("<Left>", lambda e: self.step(-1))
+        self.canvas.bind("<Right>", lambda e: self.step(1, mark=True))
         self.bind("<Escape>", lambda e: self.set_draw(None))
-        self.bind("<Left>", lambda e: self.step(-1))
-        self.bind("<Right>", lambda e: self.step(1, mark=True))
 
         # --- Barre du bas -----------------------------------------------------------
         bottom = ttk.Frame(self, padding=8)
@@ -326,10 +372,10 @@ class App(tk.Tk):
         self.btn_export.pack(side="right")
         self.progress = ttk.Progressbar(bottom, length=160, mode="determinate")
         self.progress.pack(side="right", padx=10)
-        bo = ttk.Button(bottom, text="📂 Où enregistrer…", command=self.pick_out)
+        bo = ttk.Button(bottom, text="📂 Destination…", command=self.pick_out)
         bo.pack(side="right")
         self.out_dir = tk.StringVar(value="")
-        self.out_lbl = ttk.Label(bottom, text="→ dossier « anonymise » à côté des photos", foreground="#555")
+        self.out_lbl = ttk.Label(bottom, text="→ dossier « anonymise »", foreground="#555")
         self.out_lbl.pack(side="right", padx=6)
         Tooltip(bo, "Par défaut, un dossier « anonymise » est créé à côté des photos. "
                     "Les photos d'origine ne sont jamais modifiées.")
@@ -365,10 +411,19 @@ class App(tk.Tk):
             self.adv.pack(fill="x", after=self.top)
         else:
             self.adv.pack_forget()
+        self._save_cfg()
         self._on_mode()
 
     def _on_safe_only(self) -> None:
+        self._save_cfg()
         self._on_mode()
+
+    def _save_cfg(self) -> None:
+        self.cfg.update(advanced=self.advanced.get(), safe_only=self.safe_only.get())
+        save_config(self.cfg)
+
+    def _terrain(self) -> bool:
+        return self.advanced.get() and self.safe_only.get()
 
     def _strength(self) -> float:
         return self.strength.get() if self.advanced.get() else core.SIMPLE_STRENGTH
@@ -384,14 +439,15 @@ class App(tk.Tk):
         mode = self._mode_key()
         state = ["disabled"] if mode in ("noir", "emoji") else ["!disabled"]
         self.strength_scale.state(state)
-        if self.safe_only.get() and self.strength.get() < core.min_safe_strength():
-            self.strength.set(core.min_safe_strength())
         self._on_strength(redraw=False)
         self.redraw()
 
     def _on_strength(self, redraw: bool = True) -> None:
-        if self.advanced.get() and self.safe_only.get() and self.strength.get() < core.min_safe_strength():
-            self.strength.set(core.min_safe_strength())
+        if self._terrain():
+            if self.strength.get() < core.min_safe_strength():
+                self.strength.set(core.min_safe_strength())
+            if self.margin.get() < core.MIN_SAFE_MARGIN:
+                self.margin.set(core.MIN_SAFE_MARGIN)
         self.strength_val.configure(text=f"{round(self.strength.get() * 100)} %")
         level, msg = core.safety(self._mode_key(), self._strength(), self._margin())
         bg, fg = SAFETY_COLORS[level]
@@ -407,11 +463,17 @@ class App(tk.Tk):
     def set_draw(self, kind: str | None) -> None:
         self.draw_kind = kind
         if kind == "visage":
-            self.hint.configure(text="✏ Dessine un rectangle autour du visage (Échap pour annuler)")
+            self.hint_text = "✏  Dessine un rectangle autour du visage oublié\n(maintiens le clic gauche et fais glisser · Échap pour annuler)"
         elif kind == "objet":
-            self.hint.configure(text="✏ Dessine un rectangle sur l'élément à cacher (Échap pour annuler)")
+            self.hint_text = "✏  Dessine un rectangle sur ce qu'il faut cacher\n(badge, plaque, tatouage… · Échap pour annuler)"
         else:
-            self.hint.configure(text="")
+            self.hint_text = ""
+        self.redraw()
+
+    def flash_hint(self, text: str) -> None:
+        self.hint_text = text
+        self.redraw()
+        self.after(2500, lambda: (self.draw_kind is None and self.hint_text == text) and self.set_draw(None))
 
     # ======================================================== fichiers ==
     def pick_files(self) -> None:
@@ -440,16 +502,23 @@ class App(tk.Tk):
             return
         known = {os.path.normcase(i.path) for i in self.items}
         excl = [self.out_dir.get()] if self.out_dir.get() else []
-        new = []
+        new, skipped = [], 0
         for p in paths:
             p = os.path.abspath(p)
-            files = core.list_images(p, excl) if os.path.isdir(p) else [p]
+            if os.path.isdir(p):
+                files, sk = core.scan_images(p, excl)
+                skipped += sk
+            else:
+                files = [p]
             for f in files:
                 if os.path.normcase(f) not in known and os.path.splitext(f)[1].lower() in core.IMAGE_EXTS:
                     known.add(os.path.normcase(f))
                     new.append(Item(f))
+        if skipped:
+            self.status.configure(text=f"{skipped} photo(s) déjà anonymisée(s) ignorée(s) "
+                                       "(dossier « anonymise » ou nom « anonyme_0001 »).")
         if not new:
-            if paths:
+            if paths and not skipped:
                 self.status.configure(text="Aucune nouvelle photo trouvée.")
             return
         first = len(self.items)
@@ -457,18 +526,27 @@ class App(tk.Tk):
         for it in new:
             self.listbox.insert("end", it.label)
             self.jobs.put((it, self.sens.get()))
-        self._update_progress()
+        if not skipped:
+            self._update_progress()
         if self.current is None:
             self.select_index(first)
 
     def clear(self) -> None:
         if self.busy:
             return
+        self._purge_jobs()
         self.items.clear()
         self.listbox.delete(0, "end")
         self.current = None
         self.proxy = None
         self.redraw()
+
+    def _purge_jobs(self) -> None:
+        try:
+            while True:
+                self.jobs.get_nowait()
+        except queue.Empty:
+            pass
 
     def remove_selected(self) -> None:
         if self.busy:
@@ -477,6 +555,9 @@ class App(tk.Tk):
         if not sel:
             return
         idx = sel[0]
+        if not messagebox.askyesno(APP_NAME, f"Retirer « {os.path.basename(self.items[idx].path)} » de la liste ?\n"
+                                             "(le fichier n'est pas supprimé de ton ordinateur)"):
+            return
         del self.items[idx]
         self.listbox.delete(idx)
         self.current = None
@@ -505,12 +586,23 @@ class App(tk.Tk):
         try:
             while True:
                 kind, it, data = self.results.get_nowait()
+                if kind == "exp_prog":
+                    self.progress.configure(value=it)
+                    continue
+                if kind == "exp_done":
+                    self._export_done(data)
+                    continue
                 if it not in self.items:
                     continue
                 if kind == "start":
                     it.state = "analyse"
                 elif kind == "ok":
-                    it.boxes = data + [b for b in it.boxes if b.manual]
+                    fresh = [b for b in data if not any(core._overlap(b, r) > 0.5 for r in it.rejected)]
+                    old = sorted((b.x, b.y, b.w, b.h) for b in it.boxes if not b.manual)
+                    new = sorted((b.x, b.y, b.w, b.h) for b in fresh)
+                    if it.reviewed and old != new:
+                        it.reviewed = False  # les zones ont changé : à revérifier
+                    it.boxes = fresh + [b for b in it.boxes if b.manual]
                     it.state = "ok"
                 else:
                     it.state, it.error = "erreur", data
@@ -562,12 +654,20 @@ class App(tk.Tk):
         total = len(self.items)
         done = sum(i.state in ("ok", "erreur", "fait") for i in self.items)
         self.progress.configure(maximum=max(total, 1), value=done)
-        engine = {"yunet": "IA", "haar": "basique", "aucun": "aucune"}[self.detector.backend]
         if total:
             rev = sum(i.reviewed for i in self.items)
-            self.status.configure(text=f"{total} photo(s) · {rev} vérifiée(s) · détection : {engine}")
+            self.status.configure(text=f"{total} photo(s) · {rev} vérifiée(s) ✔")
         else:
-            self.status.configure(text=f"Détection : {engine}")
+            self.status.configure(text="")
+
+    def _doubtful(self, it: Item) -> list[int]:
+        """Numéros des zones auto qui ressemblent à une fausse détection (petites ou peu sûres)."""
+        autos = [b for b in it.boxes if not b.manual]
+        if not autos:
+            return []
+        big = max(b.w for b in autos)
+        return [n for n, b in enumerate(it.boxes, 1)
+                if not b.manual and (b.score < 0.6 or (len(autos) > 1 and b.w < 0.45 * big))]
 
     def _update_review(self) -> None:
         it = self.current
@@ -584,7 +684,12 @@ class App(tk.Tk):
             txt = f"Photo {i} / {len(self.items)} · {n} visage{'s' if n > 1 else ''}"
             if o:
                 txt += f" + {o} autre{'s' if o > 1 else ''} zone{'s' if o > 1 else ''}"
-            txt += " — vérifie qu'il n'en manque aucun" + ("  ✔" if it.reviewed else "")
+            dz = self._doubtful(it)
+            if dz:
+                txt += f" — ⚠ zone {', '.join(map(str, dz))} : vraiment un visage ? Sinon, sa ✕"
+            else:
+                txt += " — vérifie qu'il n'en manque aucun"
+            txt += "  ✔" if it.reviewed else ""
         self.review_lbl.configure(text=txt)
 
     # ========================================================== aperçu ==
@@ -623,8 +728,24 @@ class App(tk.Tk):
             self._refresh_row(self.current)
             self._update_progress()
         sel = self.listbox.curselection()
-        idx = max(0, min(len(self.items) - 1, (sel[0] if sel else 0) + d))
+        cur = sel[0] if sel else 0
+        if mark and d > 0 and cur == len(self.items) - 1:
+            self._end_of_review()
+            return
+        idx = max(0, min(len(self.items) - 1, cur + d))
         self.select_index(idx)
+
+    def _end_of_review(self) -> None:
+        if self.busy:
+            return
+        todo = [i for i in self.items if i.state in ("ok", "fait") and not i.reviewed]
+        if todo:
+            messagebox.showinfo(APP_NAME, f"C'était la dernière photo, mais il en reste {len(todo)} "
+                                          "à vérifier (sans ✔ dans la liste). Je t'y emmène.")
+            self.select_index(self.items.index(todo[0]))
+        elif self.items and messagebox.askyesno(
+                APP_NAME, "✔ Toutes les photos sont vérifiées !\n\nEnregistrer les photos anonymisées maintenant ?"):
+            self.export()
 
     def _box_canvas(self, b: core.Box) -> tuple[float, float, float, float]:
         k = self.view_scale * self.proxy_scale
@@ -658,6 +779,8 @@ class App(tk.Tk):
         c.create_image(*self.offset, anchor="nw", image=self.tkimg)
 
         k_full = 1 / ps
+        self._handles = []
+        doubtful = self._doubtful(self.current)
         for n, b in enumerate(self.current.boxes, 1):
             if mode == "bandeau" and b.kind == "visage":
                 m = 0
@@ -671,11 +794,29 @@ class App(tk.Tk):
             width = 3 if b is self.sel_box else 2
             dash = (5, 3) if self.preview.get() and b is not self.sel_box else None
             c.create_rectangle(x0, y0, x1, y1, outline=col, width=width, dash=dash)
-            c.create_rectangle(x0, y0 - 16, x0 + 20, y0, fill=col, outline=col)
-            c.create_text(x0 + 10, y0 - 8, text=str(n), fill="black", font=("Segoe UI", 8, "bold"))
+            tag = f"{n} ?" if n in doubtful else str(n)
+            tw = 14 + 7 * len(tag)
+            c.create_rectangle(x0, y0 - 16, x0 + tw, y0, fill=col, outline=col)
+            c.create_text(x0 + tw / 2, y0 - 8, text=tag, fill="black", font=("Segoe UI", 8, "bold"))
+            # petite croix pour supprimer la zone d'un clic
+            c.create_rectangle(x1 - 16, y0 - 16, x1, y0, fill="#222", outline=col)
+            c.create_text(x1 - 8, y0 - 8, text="✕", fill="white", font=("Segoe UI", 8, "bold"))
+            self._handles.append(((x1 - 16, y0 - 16, x1, y0), b))
         if self.current.state in ("attente", "analyse"):
             c.create_text(self.offset[0] + 10, self.offset[1] + 10, anchor="nw", fill="yellow",
                           font=("Segoe UI", 12, "bold"), text="Recherche des visages…")
+        self._draw_hint()
+
+    def _draw_hint(self) -> None:
+        if not self.hint_text:
+            return
+        c = self.canvas
+        cw = max(c.winfo_width(), 50)
+        t = c.create_text(cw // 2, 14, anchor="n", text=self.hint_text, fill="white", justify="center",
+                          font=("Segoe UI", 12, "bold"), width=cw - 40)
+        x0, y0, x1, y1 = c.bbox(t)
+        r = c.create_rectangle(x0 - 12, y0 - 8, x1 + 12, y1 + 8, fill="#0a5fb4", outline="")
+        c.tag_lower(r, t)
 
     # ========================================================== souris ==
     def _to_full(self, x: float, y: float) -> tuple[int, int]:
@@ -696,8 +837,13 @@ class App(tk.Tk):
         return min(hits, key=lambda b: b.w * b.h) if hits else None
 
     def on_press(self, e) -> None:
+        self.canvas.focus_set()  # Suppr agit sur la zone, plus sur la liste
         if self.proxy is None or self.current is None:
             return
+        for (hx0, hy0, hx1, hy1), b in self._handles:
+            if self.draw_kind is None and hx0 <= e.x <= hx1 and hy0 <= e.y <= hy1:
+                self._remove_box(b)
+                return
         if self.draw_kind is None:
             hit = self._box_at(e.x, e.y)
             if hit is not None:  # clic sur une zone : sélection
@@ -715,7 +861,6 @@ class App(tk.Tk):
 
     def on_release(self, e) -> None:
         if not self.drag_rect:
-            self.redraw()
             return
         x0, y0 = self._to_full(*self.drag_start)
         x1, y1 = self._to_full(e.x, e.y)
@@ -744,11 +889,13 @@ class App(tk.Tk):
         if self.sel_box is not None:
             self._remove_box(self.sel_box)
         elif self.current and self.current.boxes:
-            self.hint.configure(text="Clique d'abord sur une zone pour la sélectionner.")
+            self.flash_hint("Clique d'abord sur un cadre pour le sélectionner (il devient jaune),\nou clique sur sa petite croix ✕.")
 
     def _remove_box(self, b: core.Box) -> None:
         if b in self.current.boxes:
             self.current.boxes.remove(b)
+            if not b.manual:
+                self.current.rejected.append(b)  # ne reviendra pas à la prochaine détection
         self.sel_box = None
         self._refresh_row(self.current)
         self.redraw()
@@ -767,6 +914,11 @@ class App(tk.Tk):
         if any(i.state in ("attente", "analyse") for i in self.items):
             messagebox.showinfo(APP_NAME, "La recherche des visages n'est pas terminée, patiente quelques secondes.")
             return
+        if self._terrain() and self.detector.backend != "yunet":
+            messagebox.showerror(APP_NAME, "Mode terrain : enregistrement refusé, car la détection IA n'est pas "
+                                           "disponible dans ce programme.\nRecompile-le avec le modèle YuNet, "
+                                           "ou désactive le mode terrain en connaissance de cause.")
+            return
         mode, shape, margin, strength = self._mode_key(), self._shape(), self._margin(), self._strength()
         level, msg = core.safety(mode, strength, margin)
         if level != "ok" and not messagebox.askyesno(
@@ -778,7 +930,7 @@ class App(tk.Tk):
         if not todo:
             messagebox.showwarning(APP_NAME, "Aucune photo lisible dans la liste.")
             return
-        not_rev = [i for i in todo if not i.reviewed and i is not self.current]
+        not_rev = [i for i in todo if not i.reviewed]
         if not_rev and not messagebox.askyesno(
                 APP_NAME, f"{len(not_rev)} photo(s) n'ont pas été vérifiées (pas de ✔ dans la liste).\n"
                           "La détection automatique peut rater des visages.\n\nEnregistrer quand même ?",
@@ -796,9 +948,12 @@ class App(tk.Tk):
                           "Limites : sur SSD, clé USB, OneDrive/Google Drive ou sauvegardes, des copies "
                           "peuvent subsister.\n\nContinuer ?", icon="warning"):
             return
+        reuse = {i.path: i.out_path for i in todo if i.out_path and os.path.exists(i.out_path)
+                 and (not self.out_dir.get() or os.path.dirname(i.out_path) == os.path.abspath(self.out_dir.get()))}
         try:
-            plan = core.plan_outputs([i.path for i in todo], self.out_dir.get() or None,
+            plan = core.plan_outputs([i.path for i in todo if i.path not in reuse], self.out_dir.get() or None,
                                      self.advanced.get() and self.keep_names.get())
+            plan.update(reuse)
         except OSError as exc:
             messagebox.showerror(APP_NAME, f"Impossible de préparer les noms de fichiers : {exc}")
             return
@@ -813,32 +968,51 @@ class App(tk.Tk):
         self.status.configure(text="Enregistrement…")
 
         jobs = [(it, plan[it.path], list(it.boxes)) for it in todo]
+        n_reused = len(reuse)
 
-        def run():
-            written, errors, deleted, last = 0, [], 0, None
-            for n, (it, dst, boxes) in enumerate(jobs, 1):
-                if self.cancel:
-                    break
-                try:
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
-                    rgb, alpha = core.load_image_full(it.path)
-                    out = core.anonymize(rgb, boxes, mode, shape, margin, strength=strength)
-                    core.save_clean(out, dst, alpha)
-                    written += 1
-                    last = dst
-                    it.state = "fait"
-                    if delete:
-                        core.secure_delete(it.path)
-                        deleted += 1
-                except Exception as exc:
-                    errors.append(f"{os.path.basename(it.path)} : {exc}")
-                self.after(0, lambda n=n, it=it: (self.progress.configure(value=n), self._refresh_row(it)))
-            self.after(0, lambda: self._export_done(written, len(jobs), errors, deleted, last))
+        def run():  # thread : ne touche JAMAIS à Tk, communique par la file self.results
+            written, errors, deleted, last, done_items, gone = 0, [], 0, None, [], []
+            try:
+                for n, (it, dst, boxes) in enumerate(jobs, 1):
+                    if self.cancel:
+                        break
+                    try:
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        rgb, alpha = core.load_image_full(it.path)
+                        out = core.anonymize(rgb, boxes, mode, shape, margin, strength=strength)
+                        core.save_clean(out, dst, alpha)
+                        written += 1
+                        last = dst
+                        done_items.append((it, dst))
+                        if delete:
+                            core.secure_delete(it.path)
+                            deleted += 1
+                            gone.append(it)
+                    except Exception as exc:
+                        errors.append(f"{os.path.basename(it.path)} : {exc}")
+                    self.results.put(("exp_prog", n, None))
+            except BaseException as exc:  # filet de sécurité : l'interface ne reste jamais bloquée
+                errors.append(f"Erreur inattendue : {exc!r}")
+            finally:
+                self.results.put(("exp_done", None, dict(written=written, total=len(jobs), errors=errors,
+                                                         deleted=deleted, last=last, done=done_items,
+                                                         gone=gone, reused=n_reused)))
 
         self.export_thread = threading.Thread(target=run, daemon=True)
         self.export_thread.start()
 
-    def _export_done(self, written: int, total: int, errors: list[str], deleted: int, last: str | None) -> None:
+    def _export_done(self, r: dict) -> None:
+        written, total, errors, deleted, last = r["written"], r["total"], r["errors"], r["deleted"], r["last"]
+        for it, dst in r["done"]:
+            it.state, it.out_path = "fait", dst
+            self._refresh_row(it)
+        for it in r["gone"]:  # originaux effacés : on les retire de la liste
+            if it in self.items:
+                idx = self.items.index(it)
+                del self.items[idx]
+                self.listbox.delete(idx)
+                if it is self.current:
+                    self.current, self.proxy = None, None
         self.busy = False
         self.btn_export.configure(text="✔ Anonymiser et enregistrer")
         for b in (self.btn_add, self.btn_dir, self.btn_clear):
@@ -847,14 +1021,19 @@ class App(tk.Tk):
         msg = f"{written} photo(s) sur {total} enregistrée(s), sans informations cachées."
         if self.cancel:
             msg += "\n\nEnregistrement annulé par l'utilisateur."
+        if r["reused"]:
+            msg += f"\n{r['reused']} photo(s) déjà enregistrée(s) avant : version précédente remplacée."
         if deleted:
-            msg += f"\n{deleted} original(aux) effacé(s)."
+            msg += f"\n{deleted} original(aux) effacé(s) et retiré(s) de la liste."
         if errors:
             msg += f"\n\n{len(errors)} erreur(s) :\n" + "\n".join(errors[:10])
         self.status.configure(text=msg.split("\n")[0])
         if self._closing:
             self.destroy()
             return
+        if self.current is None and self.items:
+            self.select_index(0)
+        self.redraw()
         if last and messagebox.askyesno(APP_NAME, msg + "\n\nOuvrir le dossier ?"):
             folder = os.path.dirname(last)
             if sys.platform == "win32":
@@ -865,6 +1044,7 @@ class App(tk.Tk):
             messagebox.showwarning(APP_NAME, msg)
 
     _closing = False
+    _handles: list = []
     _export_start = 0.0
 
     def on_close(self) -> None:
@@ -881,19 +1061,22 @@ class App(tk.Tk):
 # --------------------------------------------------------------------------- #
 def selftest(argv: list[str]) -> int:
     """Vérification sans interface (utilisée par la CI) : détecteur + chaîne complète."""
+    import shutil
     import tempfile
 
     import numpy as np
-    log_path = argv[argv.index("--log") + 1] if "--log" in argv else None
+    i = argv.index("--log") if "--log" in argv else -1
+    log_path = argv[i + 1] if 0 <= i < len(argv) - 1 else None
     lines, ok = [], True
     det = core.FaceDetector()
-    lines.append(f"backend={det.backend}")
+    lines.append(f"backend={det.backend} heic={core.HEIF_OK}")
+    if det.tampered or not core.HEIF_OK:
+        ok = False
     lines += [f"probleme={p}" for p in det.problems]
     if not det.ok or ("--require-ai" in argv and det.backend != "yunet"):
         ok = False
     try:
-        d = os.path.join(tempfile.gettempdir(), "test_é_à ü")
-        os.makedirs(d, exist_ok=True)
+        d = tempfile.mkdtemp(prefix="anonymiseur_é_à ü_")
         src = os.path.join(d, "phöto test.jpg")
         Image.fromarray(np.random.default_rng(0).integers(0, 255, (300, 400, 3), dtype=np.uint8)).save(src)
         det.detect(core.load_image(src))
@@ -902,6 +1085,7 @@ def selftest(argv: list[str]) -> int:
         core.save_clean(core.anonymize(core.load_image(src), [core.Box(100, 100, 80, 80)]), dst)
         lines.append(f"sortie={dst} existe={os.path.exists(dst)}")
         ok &= os.path.exists(dst)
+        shutil.rmtree(d, ignore_errors=True)
     except Exception as exc:
         lines.append(f"erreur={exc!r}")
         ok = False
