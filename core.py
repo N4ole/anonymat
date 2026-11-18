@@ -25,10 +25,48 @@ from PIL import Image, ImageOps
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
 MODES = {
-    "caviardage": "Caviardage (noir plein) - le plus sûr",
-    "pixel": "Pixelisation destructive",
-    "flou": "Flou destructif",
+    "caviardage": "🔒 Caviardage (noir plein)",
+    "pixel": "🔒 Pixelisation destructive (+ bruit)",
+    "flou": "🔒 Flou destructif",
+    "pixel_classique": "⚠ Pixelisation classique",
+    "flou_classique": "⚠ Flou gaussien classique",
+    "bandeau": "⛔ Bandeau sur les yeux",
 }
+
+# Méthodes « destructives » : sous le seuil (nb de blocs en largeur) le visage
+# n'est plus identifiable. Au-dessus, on prévient l'utilisateur.
+SAFE_BLOCKS = 12     # <= 12 blocs sur la largeur de la zone : anonymat total
+WEAK_BLOCKS = 20     # 13-20 : reconnaissable par un proche / une IA
+
+
+def blocks_for(strength: float, lo: int = 64, hi: int = 3) -> int:
+    """Force 0 -> `lo` blocs (effet très léger), 1 -> `hi` blocs. Échelle logarithmique
+    pour que le curseur soit progressif sur toute sa course."""
+    s = min(1.0, max(0.0, strength))
+    return max(hi, int(round(lo * (hi / lo) ** s)))
+
+
+def safety(mode: str, strength: float) -> tuple[str, str]:
+    """Renvoie (niveau, message) ; niveau ∈ ok | moyen | danger."""
+    if mode == "caviardage":
+        return "ok", "Anonymat total : aucune information du visage n'est conservée."
+    if mode in ("pixel", "flou"):
+        b = blocks_for(strength)
+        if b <= SAFE_BLOCKS:
+            return "ok", f"Anonymat total : visage réduit à {b} blocs, information détruite."
+        if b <= WEAK_BLOCKS:
+            return "moyen", f"Sous le seuil d'anonymat ({b} blocs) : un proche ou une IA peut reconnaître la personne."
+        return "danger", f"Effet léger ({b} blocs) : le visage reste reconnaissable."
+    if mode == "pixel_classique":
+        b = blocks_for(strength)
+        if b <= SAFE_BLOCKS:
+            return "moyen", f"Pixelisation sans bruit ({b} blocs) : correcte, mais des outils d'IA savent parfois retrouver l'identité."
+        return "danger", f"Pixelisation classique ({b} blocs) : visage reconnaissable / reconstructible par IA."
+    if mode == "flou_classique":
+        return "danger", "Flou gaussien : réversible en partie (déconvolution, IA), même fort. Ne protège pas vraiment."
+    if mode == "bandeau":
+        return "danger", "Bandeau sur les yeux : la personne reste facilement reconnaissable (bouche, nez, cheveux…)."
+    return "danger", ""
 
 
 def resource_path(rel: str) -> str:
@@ -196,25 +234,21 @@ def merge_boxes(boxes: list[Box], thr: float = 0.5) -> list[Box]:
 #  Anonymisation
 # --------------------------------------------------------------------------- #
 def _destroy(region: np.ndarray, blocks: int, rng: np.random.Generator, noise: int = 18) -> np.ndarray:
-    """Écrase la zone à `blocks` x `blocks` pixels + bruit : l'info d'origine est perdue."""
+    """Réduit la zone à `blocks` blocs de large (+ bruit aléatoire) : l'info d'origine est perdue."""
     h, w = region.shape[:2]
     bw = max(1, min(blocks, w))
     bh = max(1, int(round(bw * h / max(w, 1))))
     small = cv2.resize(region, (bw, bh), interpolation=cv2.INTER_AREA).astype(np.int16)
-    small += rng.integers(-noise, noise + 1, small.shape, dtype=np.int16)  # bruit aléatoire
+    if noise:
+        small += rng.integers(-noise, noise + 1, small.shape, dtype=np.int16)
     return np.clip(small, 0, 255).astype(np.uint8)
 
 
 def anonymize(rgb: np.ndarray, boxes: list[Box], mode: str = "caviardage",
               shape: str = "rectangle", margin: float = 0.25,
-              color: tuple[int, int, int] = (0, 0, 0), strength: float = 0.5) -> np.ndarray:
-    """strength : 0 = effet léger ... 1 = effet maximal.
-
-    Même au minimum, la zone est réduite à 10 pixels de large au plus : la force
-    change l'aspect, jamais le fait que l'information d'origine est détruite.
-    """
+              color: tuple[int, int, int] = (0, 0, 0), strength: float = 0.7) -> np.ndarray:
+    """strength : 0 = effet à peine visible ... 1 = effet maximal (voir `safety`)."""
     s = min(1.0, max(0.0, strength))
-    noise = int(10 + 25 * s)
     out = rgb.copy()
     H, W = out.shape[:2]
     rng = np.random.default_rng()  # graine aléatoire : rien de reproductible
@@ -223,18 +257,38 @@ def anonymize(rgb: np.ndarray, boxes: list[Box], mode: str = "caviardage",
         if e.w < 2 or e.h < 2:
             continue
         region = out[e.y:e.y + e.h, e.x:e.x + e.w]
+        mask = None
 
         if mode == "caviardage":
             patch = np.empty_like(region)
             patch[:] = color
-        elif mode == "pixel":
-            small = _destroy(region, round(10 - 6 * s), rng, noise)  # 10 -> 4 blocs
+
+        elif mode in ("pixel", "pixel_classique"):
+            noise = int(8 + 22 * s) if mode == "pixel" else 0
+            small = _destroy(region, blocks_for(s), rng, noise)
             patch = cv2.resize(small, (e.w, e.h), interpolation=cv2.INTER_NEAREST)
-        else:  # flou destructif : on détruit d'abord, puis on lisse pour l'esthétique
-            small = _destroy(region, round(10 - 7 * s), rng, noise)  # 10 -> 3 blocs
-            patch = cv2.resize(small, (e.w, e.h), interpolation=cv2.INTER_LINEAR)
-            k = max(3, int(min(e.w, e.h) * (0.15 + 0.45 * s)) | 1)
+
+        elif mode == "flou":  # on détruit d'abord, puis on lisse pour l'esthétique
+            small = _destroy(region, blocks_for(s), rng, int(8 + 22 * s))
+            patch = cv2.resize(small, (e.w, e.h), interpolation=cv2.INTER_CUBIC)
+            k = max(3, int(min(e.w, e.h) / blocks_for(s) * 1.5) | 1)
             patch = cv2.GaussianBlur(patch, (k, k), 0)
+
+        elif mode == "flou_classique":  # flou gaussien simple (réversible en partie)
+            sigma = max(0.5, min(e.w, e.h) * (0.01 + 0.15 * s))
+            patch = cv2.GaussianBlur(region, (0, 0), sigma)
+
+        elif mode == "bandeau":  # bande noire sur les yeux (pas d'élargissement)
+            r = b.expanded(0, W, H)
+            thick = max(2, int(r.h * (0.12 + 0.30 * s)))
+            cy = r.y + int(r.h * 0.40)  # les yeux sont vers 40 % de la hauteur du visage
+            y0, y1 = max(0, cy - thick // 2), min(H, cy + thick // 2)
+            x0, x1 = max(0, r.x - int(r.w * 0.08)), min(W, r.x + r.w + int(r.w * 0.08))
+            out[y0:y1, x0:x1] = color
+            continue
+
+        else:
+            raise ValueError(f"Méthode inconnue : {mode}")
 
         if shape == "ellipse":
             mask = np.zeros((e.h, e.w), np.uint8)

@@ -19,7 +19,20 @@ Sans lui, le programme se rabat sur la détection Haar (plus ancienne, rate dava
    - glisser à la souris → ajouter une zone (bleu) ;
    - clic droit → supprimer une zone (faux positif) ;
    - ◀ ▶ → image suivante / précédente ; `Suppr` → retirer l'image de la liste.
-3. Choisis la méthode et règle la **Force de l'effet** (pixelisation : 10 → 4 blocs de large ; flou : 10 → 3 blocs + flou plus large ; grisé pour le caviardage, déjà total). Même à 0 %, l'information d'origine est détruite.
+3. Choisis la méthode et règle la **Force de l'effet** (0 % = à peine visible, 100 % = maximal). Un bandeau coloré indique en direct le niveau de protection :
+   - 🔒 vert : anonymat total ;
+   - ⚠ orange : sous le seuil, reconnaissable par un proche ou une IA ;
+   - ⛔ rouge : méthode réversible ou insuffisante.
+   Une confirmation est demandée avant d'enregistrer si le réglage n'est pas vert.
+
+   | Méthode | Sûre ? |
+   |---|---|
+   | 🔒 Caviardage (noir plein) | Toujours |
+   | 🔒 Pixelisation destructive (+ bruit) | À partir d'environ 56 % (≤ 12 blocs) |
+   | 🔒 Flou destructif | À partir d'environ 56 % |
+   | ⚠ Pixelisation classique (sans bruit) | Au mieux « moyen » |
+   | ⚠ Flou gaussien classique | Jamais : réversible en partie |
+   | ⛔ Bandeau sur les yeux | Jamais : visage reconnaissable |
 4. `Aperçu du résultat` pour voir le rendu, puis `✔ Anonymiser et enregistrer`.
 
 Les copies vont dans un sous-dossier `anonymise\` (`photo_anonyme.jpg`). **Les originaux ne sont jamais modifiés** — pense à les supprimer toi-même si besoin.

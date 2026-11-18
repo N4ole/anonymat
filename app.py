@@ -99,7 +99,7 @@ class App(tk.Tk):
         ttk.Label(top, text="Méthode :").pack(side="left")
         self.mode = tk.StringVar(value=core.MODES["caviardage"])
         cb = ttk.Combobox(top, textvariable=self.mode, values=list(core.MODES.values()),
-                          state="readonly", width=34)
+                          state="readonly", width=36)
         cb.pack(side="left", padx=4)
         cb.bind("<<ComboboxSelected>>", lambda e: self._on_mode())
 
@@ -120,21 +120,25 @@ class App(tk.Tk):
         opts.pack(fill="x")
         ttk.Label(opts, text="Sensibilité de détection :").pack(side="left")
         self.sens = tk.DoubleVar(value=0.6)
-        ttk.Scale(opts, from_=0.0, to=1.0, variable=self.sens, length=160).pack(side="left", padx=4)
+        ttk.Scale(opts, from_=0.0, to=1.0, variable=self.sens, length=120).pack(side="left", padx=4)
         ttk.Button(opts, text="🔄 Relancer la détection", command=self.redetect_all).pack(side="left", padx=4)
         ttk.Label(opts, text="   Marge autour du visage :").pack(side="left")
         self.margin = tk.DoubleVar(value=0.30)
-        ttk.Scale(opts, from_=0.0, to=0.8, variable=self.margin, length=140,
+        ttk.Scale(opts, from_=0.0, to=0.8, variable=self.margin, length=110,
                   command=lambda v: self.redraw()).pack(side="left", padx=4)
         self.strength_lbl = ttk.Label(opts, text="   Force de l'effet :")
         self.strength_lbl.pack(side="left")
-        self.strength = tk.DoubleVar(value=0.6)
-        self.strength_scale = ttk.Scale(opts, from_=0.0, to=1.0, variable=self.strength, length=140,
+        self.strength = tk.DoubleVar(value=0.7)
+        self.strength_scale = ttk.Scale(opts, from_=0.0, to=1.0, variable=self.strength, length=170,
                                         command=lambda v: self._on_strength())
         self.strength_scale.pack(side="left", padx=4)
-        self.strength_val = ttk.Label(opts, text="60 %", width=5)
+        self.strength_val = ttk.Label(opts, text="70 %", width=5)
         self.strength_val.pack(side="left")
         self.out_dir = tk.StringVar(value="")
+
+        # Indicateur de niveau d'anonymat
+        self.safety_lbl = tk.Label(self, anchor="w", padx=10, pady=4, font=("Segoe UI", 10, "bold"))
+        self.safety_lbl.pack(fill="x", padx=8, pady=(0, 6))
 
         # Corps : liste + canvas
         body = ttk.PanedWindow(self, orient="horizontal")
@@ -340,20 +344,33 @@ class App(tk.Tk):
         self.listbox.see(idx)
         self.on_select()
 
+    SAFETY_COLORS = {"ok": ("#e6f6ea", "#1b7a34"), "moyen": ("#fff4dc", "#9a5b00"),
+                     "danger": ("#fde8e7", "#b3261e")}
+    SAFETY_ICONS = {"ok": "🔒", "moyen": "⚠", "danger": "⛔"}
+
     def _on_mode(self) -> None:
-        # Le caviardage est déjà « 100 % » : la force n'a pas de sens, on grise le curseur.
-        state = ["disabled"] if self._mode_key() == "caviardage" else ["!disabled"]
+        mode = self._mode_key()
+        # Le caviardage est déjà total : la force n'a pas de sens, on grise le curseur.
+        state = ["disabled"] if mode == "caviardage" else ["!disabled"]
         self.strength_scale.state(state)
         self.strength_lbl.state(state)
         self.strength_val.state(state)
-        if self._mode_key() != "caviardage" and not self.preview.get():
+        self.strength_lbl.configure(text="   Épaisseur du bandeau :" if mode == "bandeau" else "   Force de l'effet :")
+        if mode != "caviardage" and not self.preview.get():
             self.preview.set(True)  # on montre directement l'effet du curseur
+        self._update_safety()
         self.redraw()
 
     def _on_strength(self) -> None:
         self.strength_val.configure(text=f"{round(self.strength.get() * 100)} %")
+        self._update_safety()
         if self.preview.get():
             self.redraw()
+
+    def _update_safety(self) -> None:
+        level, msg = core.safety(self._mode_key(), self.strength.get())
+        bg, fg = self.SAFETY_COLORS[level]
+        self.safety_lbl.configure(text=f"{self.SAFETY_ICONS[level]}  {msg}", bg=bg, fg=fg)
 
     def _mode_key(self) -> str:
         return next(k for k, v in core.MODES.items() if v == self.mode.get())
@@ -458,6 +475,12 @@ class App(tk.Tk):
 
         mode, shape, margin = self._mode_key(), self.shape.get().lower(), self.margin.get()
         strength = self.strength.get()
+        level, msg = core.safety(mode, strength)
+        if level != "ok" and not messagebox.askyesno(
+                APP_NAME, "⚠ Ce réglage ne garantit PAS l'anonymat :\n\n" + msg +
+                          "\n\nPour un anonymat total : caviardage, ou méthode 🔒 avec une force plus élevée.\n\n"
+                          "Enregistrer quand même ?", icon="warning"):
+            return
         out_dir = self.out_dir.get() or None
         todo = [i for i in self.items if i.state != "erreur"]
         self.progress.configure(maximum=len(todo), value=0)
