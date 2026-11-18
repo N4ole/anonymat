@@ -10,8 +10,9 @@ Une faille de sécurité, c'est par exemple :
 - une fuite dans un fichier écrit par le programme ;
 - un contournement de la vérification du modèle IA.
 
-**N'ouvre pas d'issue publique.** Utilise plutôt
-[« Report a vulnerability »](https://github.com/N4ole/anonymat/security/advisories/new) (onglet *Security* du dépôt).
+**Ne décris pas la faille publiquement.** Ouvre une issue avec le formulaire
+[« 🔒 Faille de sécurité »](https://github.com/N4ole/anonymat/issues/new?template=faille.yml)
+en indiquant seulement qu'une faille existe et dans quelle version, **sans aucun détail technique**. Les détails seront échangés par un canal privé.
 
 **Ne joins jamais de vraie photo de personne.** Reproduis le problème avec une image de synthèse, un dessin ou une photo libre de droits, ou décris simplement les dimensions et la position de la zone.
 

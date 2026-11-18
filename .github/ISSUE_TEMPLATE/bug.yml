@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         ⚠ **Ne joins JAMAIS de vraie photo de personne.** Utilise une image de synthèse ou décris la situation.
-        Si un visage reste reconnaissable ou si une information fuit, c'est une **faille** : signale-la en privé (onglet *Security*), pas ici.
+        Si un visage reste reconnaissable ou si une information fuit, c'est une **faille** : utilise plutôt le formulaire « 🔒 Faille de sécurité », sans détail.
   - type: input
     id: version
     attributes:

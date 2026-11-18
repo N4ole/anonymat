@@ -1,0 +1,28 @@
+name: 🔒 Faille de sécurité
+description: Signaler qu'une faille existe, SANS la décrire publiquement
+labels: [sécurité]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Merci ! **N'écris ici aucun détail technique, aucune méthode de reproduction et ne joins aucune photo.**
+        Cette issue est publique : elle sert seulement à ouvrir un échange privé pour obtenir les détails.
+  - type: input
+    id: version
+    attributes:
+      label: Version concernée
+      placeholder: "6.0.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type (sans détail)
+      options:
+        - Visage ou partie de visage reconnaissable malgré le 🔒
+        - Information cachée qui reste dans les photos enregistrées
+        - Fichier ou trace laissé sur l'ordinateur
+        - Programme ou modèle modifié non détecté
+        - Autre
+    validations:
+      required: true
