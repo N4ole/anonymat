@@ -43,6 +43,24 @@ Un bandeau indique en permanence le niveau de protection : 🔒 vert = anonymat 
 
 **Mode terrain** (*Méthodes sûres uniquement*) : ne propose que les méthodes 🔒, bloque la force et la marge au-dessus du seuil, et **refuse d'enregistrer sans la détection IA**. Ce réglage (et l'affichage des options avancées) est mémorisé dans `%APPDATA%\AnonymiseurVisages\reglages.json` — aucun nom de photo ni de dossier n'y est écrit.
 
+## 🧠 La détection s'améliore avec tes corrections
+
+Dans **⚙ Options avancées → 🧠 Apprendre de mes corrections** (activé par défaut) :
+
+| Ce que tu fais | Ce que le programme apprend |
+|---|---|
+| Tu ajoutes un visage oublié | Il regarde si le détecteur l'avait « presque » vu. Si oui, il **abaisse son seuil** la fois suivante pour trouver ce genre de visage. |
+| Tu supprimes une zone détectée | Il apprend à quoi ressemblent **tes** fausses détections et les marque **« ? »** ; le bouton *Enlever les « ? »* les retire d'un coup. |
+| Tu enregistres une photo vérifiée ✔ | Les zones gardées comptent comme de vrais visages. |
+
+Garde-fous :
+- le seuil appris ne peut que **descendre** (plus de visages trouvés, jamais moins), avec un plancher ;
+- le classifieur ne fait que **signaler** : il ne cache jamais une zone tout seul ;
+- seuls des **nombres** sont gardés (score de confiance, taille relative, proportions, détecteur) dans `%APPDATA%\AnonymiseurVisages\apprentissage.json` (3 000 corrections max) : jamais d'image, de position, de nom de fichier ni de date ;
+- **en mode terrain, rien n'est enregistré** ; *Oublier l'apprentissage* efface tout.
+
+Pourquoi pas un vrai ré-entraînement du réseau de neurones ? Il faudrait conserver des photos de visages (contraire au but du logiciel), embarquer PyTorch (plusieurs centaines de Mo) et des heures de calcul. La couche légère ci-dessus apporte l'essentiel du gain sur l'usage réel de chacun.
+
 ## Ce qui est garanti / ce qui ne l'est pas
 
 - ✅ Le visage est détruit (réduction à quelques blocs + bruit aléatoire non reproductible), pas seulement flouté.
@@ -59,7 +77,8 @@ Un bandeau indique en permanence le niveau de protection : 🔒 vert = anonymat 
 
 ## Fichiers
 
-- `core.py` – détection, anonymisation, noms de sortie, sauvegarde sans métadonnées, effacement
+- `learning.py` – apprentissage local à partir des corrections
+- `core.py` – détection (scores de confiance 0–1), anonymisation, noms de sortie, sauvegarde sans métadonnées, effacement
 - `app.py` – interface Tkinter (+ `--selftest` pour la CI)
 - `tests/` – tests pytest (un par bug ou exigence relevés en revue)
 - `tools_model.py` – téléchargement + vérification du modèle YuNet

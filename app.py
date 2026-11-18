@@ -23,6 +23,7 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 import core
+import learning
 
 APP_NAME = "Anonymiseur de visages"
 PROXY_SIDE = 1600       # taille max de l'image d'aperçu (fluidité sur les photos 48 Mpx)
@@ -107,6 +108,8 @@ class Item:
         self.reviewed = False
         self.rejected: list[core.Box] = []  # faux positifs supprimés : ne reviennent pas
         self.out_path: str | None = None     # dernière sortie (ré-export = remplacement)
+        self.size: tuple[int, int] = (0, 0)  # taille réelle de la photo
+        self.learned = False                 # zones déjà apprises comme « ok »
 
     @property
     def n_faces(self) -> int:
@@ -154,6 +157,7 @@ class App(tk.Tk):
         self.export_thread: threading.Thread | None = None
         self._sens_job = None
         self.cfg = load_config()
+        self.learner = learning.Learner(os.path.join(os.path.dirname(config_path()), "apprentissage.json"))
 
         self.detector = core.FaceDetector()
         self.jobs: queue.Queue = queue.Queue()
@@ -161,6 +165,7 @@ class App(tk.Tk):
         threading.Thread(target=self._worker, daemon=True).start()
 
         self._build_ui()
+        self._update_learn_label()
         self._on_mode()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(100, self._poll)
@@ -258,6 +263,22 @@ class App(tk.Tk):
         Tooltip(ss, "À droite : trouve plus de visages, mais aussi plus de fausses détections.\n"
                     "La détection est relancée automatiquement (tes zones manuelles sont gardées).")
 
+        r1c = ttk.Frame(self.adv)
+        r1c.pack(fill="x", pady=(4, 0))
+        self.learn_on = tk.BooleanVar(value=bool(self.cfg.get("learn", True)))
+        cl = ttk.Checkbutton(r1c, text="🧠 Apprendre de mes corrections", variable=self.learn_on,
+                             command=self._toggle_learn)
+        cl.pack(side="left")
+        Tooltip(cl, "La détection s'améliore avec tes corrections :\n"
+                    "• visage ajouté à la main → elle cherche plus large la fois suivante ;\n"
+                    "• zone supprimée → elle apprend à repérer ce genre de fausse détection (marquée « ? »).\n\n"
+                    "Seuls des NOMBRES sont gardés (score, taille relative, proportions) : jamais d'image, "
+                    "de position ni de nom de fichier. Elle ne cache jamais une zone toute seule.\n"
+                    "En mode terrain, rien n'est enregistré.")
+        self.learn_lbl = ttk.Label(r1c, text="", foreground="#555")
+        self.learn_lbl.pack(side="left", padx=8)
+        ttk.Button(r1c, text="Oublier l'apprentissage", command=self._reset_learn).pack(side="left")
+
         r2 = ttk.Frame(self.adv)
         r2.pack(fill="x", pady=(4, 0))
         self.safe_only = tk.BooleanVar(value=bool(self.cfg.get("safe_only", False)))
@@ -345,6 +366,10 @@ class App(tk.Tk):
         self.btn_del.pack(side="left")
         Tooltip(self.btn_del, "Clique d'abord sur une zone pour la sélectionner (elle devient jaune), "
                               "puis sur ce bouton. Raccourcis : touche Suppr ou clic droit sur la zone.")
+        self.btn_doubt = ttk.Button(tools, text="Enlever les « ? »", command=self.remove_doubtful)
+        self.btn_doubt.pack(side="left", padx=4)
+        Tooltip(self.btn_doubt, "Enlève d'un coup les zones marquées « ? » (probables fausses détections) "
+                                "de cette photo. Regarde-les d'abord !")
         bt = ttk.Button(tools, text="Enlever tous les cadres", command=self.clear_boxes)
         bt.pack(side="right")
         Tooltip(bt, "Enlève tous les cadres de CETTE photo (la photo elle-même n'est pas touchée).")
@@ -416,11 +441,57 @@ class App(tk.Tk):
 
     def _on_safe_only(self) -> None:
         self._save_cfg()
+        self._update_learn_label()
         self._on_mode()
 
     def _save_cfg(self) -> None:
-        self.cfg.update(advanced=self.advanced.get(), safe_only=self.safe_only.get())
+        self.cfg.update(advanced=self.advanced.get(), safe_only=self.safe_only.get(), learn=self.learn_on.get())
         save_config(self.cfg)
+
+    # ----------------------------------------------------- apprentissage --
+    def _learning(self) -> bool:
+        return self.learn_on.get() and self.detector.ok
+
+    def _threshold(self) -> float:
+        base = self.detector.base_threshold(self.sens.get())
+        return self.learner.threshold(self.detector.backend, base) if self._learning() else base
+
+    def _learn(self, kind: str, score: float, w: int, h: int, W: int, H: int) -> None:
+        if not self._learning() or not W:
+            return
+        self.learner.read_only = self._terrain()  # mode terrain : aucune trace écrite
+        self.learner.record(kind, self.detector.backend, score, w, h, W, H)
+        self.learner.save()
+        self._update_learn_label()
+
+    def _update_learn_label(self) -> None:
+        c = self.learner.counts(self.detector.backend)
+        n = sum(c.values())
+        if not self.learn_on.get():
+            txt = "désactivé"
+        elif n == 0:
+            txt = "rien appris pour l'instant"
+        else:
+            txt = f"{n} correction(s) apprise(s)"
+            if self.learner.trained(self.detector.backend):
+                txt += " · repère tes fausses détections"
+            t0 = self.detector.base_threshold(self.sens.get())
+            if self.learner.threshold(self.detector.backend, t0) < t0 - 1e-6:
+                txt += " · cherche plus large"
+        if self._terrain():
+            txt += " (en pause : mode terrain)"
+        self.learn_lbl.configure(text=txt)
+
+    def _toggle_learn(self) -> None:
+        self._save_cfg()
+        self._update_learn_label()
+        self.redraw()
+
+    def _reset_learn(self) -> None:
+        if messagebox.askyesno(APP_NAME, "Oublier tout ce que la détection a appris de tes corrections ?"):
+            self.learner.reset()
+            self._update_learn_label()
+            self.redraw()
 
     def _terrain(self) -> bool:
         return self.advanced.get() and self.safe_only.get()
@@ -525,7 +596,7 @@ class App(tk.Tk):
         self.items.extend(new)
         for it in new:
             self.listbox.insert("end", it.label)
-            self.jobs.put((it, self.sens.get()))
+            self.jobs.put(("detect", it, self._threshold()))
         if not skipped:
             self._update_progress()
         if self.current is None:
@@ -571,16 +642,22 @@ class App(tk.Tk):
     # ======================================================= détection ==
     def _worker(self) -> None:
         while True:
-            it, sens = self.jobs.get()
+            job, it, arg = self.jobs.get()
             try:
-                self.results.put(("start", it, None))
                 W, H = core.image_size(it.path)
+                if job == "probe":  # visage ajouté à la main : le détecteur l'avait-il « presque » vu ?
+                    rgb, _ = core.load_image_full(it.path, max_side=DETECT_SIDE)
+                    s = rgb.shape[1] / W
+                    self.results.put(("probe", it, (arg, self.detector.best_score_near(rgb, arg.scaled(s)), (W, H))))
+                    continue
+                self.results.put(("start", it, None))
                 rgb, _ = core.load_image_full(it.path, max_side=DETECT_SIDE)
                 s = W / rgb.shape[1]
-                boxes = [b.scaled(s) for b in self.detector.detect(rgb, sens)]
-                self.results.put(("ok", it, boxes))
+                boxes = [b.scaled(s) for b in self.detector.detect(rgb, threshold=arg)]
+                self.results.put(("ok", it, (boxes, (W, H))))
             except Exception as exc:  # image corrompue, format inconnu...
-                self.results.put(("err", it, f"{type(exc).__name__} : {exc}"))
+                if job != "probe":
+                    self.results.put(("err", it, f"{type(exc).__name__} : {exc}"))
 
     def _poll(self) -> None:
         try:
@@ -594,9 +671,14 @@ class App(tk.Tk):
                     continue
                 if it not in self.items:
                     continue
+                if kind == "probe":
+                    box, score, (W, H) = data
+                    self._learn("rate", score, box.w, box.h, W, H)
+                    continue
                 if kind == "start":
                     it.state = "analyse"
                 elif kind == "ok":
+                    data, it.size = data
                     fresh = [b for b in data if not any(core._overlap(b, r) > 0.5 for r in it.rejected)]
                     old = sorted((b.x, b.y, b.w, b.h) for b in it.boxes if not b.manual)
                     new = sorted((b.x, b.y, b.w, b.h) for b in fresh)
@@ -623,7 +705,7 @@ class App(tk.Tk):
             if it.state != "erreur":
                 it.state = "attente"
                 self._refresh_row(it)
-                self.jobs.put((it, self.sens.get()))
+                self.jobs.put(("detect", it, self._threshold()))
         self.redraw()
 
     def clear_boxes(self) -> None:
@@ -665,12 +747,20 @@ class App(tk.Tk):
         autos = [b for b in it.boxes if not b.manual]
         if not autos:
             return []
+        if self._learning() and it.size[0] and self.learner.trained(self.detector.backend):
+            W, H = it.size
+            return [n for n, b in enumerate(it.boxes, 1) if not b.manual and
+                    (self.learner.p_false(self.detector.backend, b.score, b.w, b.h, W, H) or 0) > learning.FALSE_PROBA]
         big = max(b.w for b in autos)
         return [n for n, b in enumerate(it.boxes, 1)
                 if not b.manual and (b.score < 0.6 or (len(autos) > 1 and b.w < 0.45 * big))]
 
     def _update_review(self) -> None:
         it = self.current
+        try:
+            self.btn_doubt.state(["!disabled"] if it and self._doubtful(it) else ["disabled"])
+        except (AttributeError, tk.TclError):
+            pass
         if not it:
             self.review_lbl.configure(text="")
             return
@@ -870,6 +960,8 @@ class App(tk.Tk):
             b = core.Box(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0), manual=True, kind=kind)
             self.current.boxes.append(b)
             self.sel_box = b
+            if kind == "visage" and self._learning():
+                self.jobs.put(("probe", self.current, b))
             if self.current.state == "fait":
                 self.current.state = "ok"
             self._refresh_row(self.current)
@@ -882,6 +974,14 @@ class App(tk.Tk):
         hit = self._box_at(e.x, e.y)
         if hit is not None:
             self._remove_box(hit)
+
+    def remove_doubtful(self) -> None:
+        if not self.current:
+            return
+        dz = set(self._doubtful(self.current))
+        for n, b in reversed(list(enumerate(self.current.boxes, 1))):
+            if n in dz:
+                self._remove_box(b)
 
     def delete_selected_box(self) -> None:
         if self.focus_get() is self.listbox:
@@ -896,6 +996,8 @@ class App(tk.Tk):
             self.current.boxes.remove(b)
             if not b.manual:
                 self.current.rejected.append(b)  # ne reviendra pas à la prochaine détection
+                self._learn("faux", b.score, b.w, b.h, *self.current.size)
+                self.current.learned = False
         self.sel_box = None
         self._refresh_row(self.current)
         self.redraw()
@@ -1005,6 +1107,11 @@ class App(tk.Tk):
         written, total, errors, deleted, last = r["written"], r["total"], r["errors"], r["deleted"], r["last"]
         for it, dst in r["done"]:
             it.state, it.out_path = "fait", dst
+            if it.reviewed and not it.learned:  # zones auto confirmées par l'utilisateur
+                for b in it.boxes:
+                    if not b.manual:
+                        self._learn("ok", b.score, b.w, b.h, *it.size)
+                it.learned = True
             self._refresh_row(it)
         for it in r["gone"]:  # originaux effacés : on les retire de la liste
             if it in self.items:

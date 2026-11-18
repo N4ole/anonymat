@@ -399,7 +399,7 @@ class FaceDetector:
         self.problems: list[str] = []
         self.tampered = False  # modèle présent mais empreinte incorrecte : alerte forte
         self._yunet = None
-        self._cascades: list[tuple[cv2.CascadeClassifier, bool]] = []
+        self._cascades: list[tuple[cv2.CascadeClassifier, bool, tuple[float, float]]] = []
 
         model = os.path.join(models_dir or resource_path("models"), YUNET_FILE)
         if os.path.isfile(model):
@@ -422,7 +422,7 @@ class FaceDetector:
                               ("haarcascade_frontalface_alt2.xml", False),
                               ("haarcascade_profileface.xml", True)):
             try:
-                self._cascades.append((load_cascade(os.path.join(hd, name)), profile))
+                self._cascades.append((load_cascade(os.path.join(hd, name)), profile, self.HAAR_NORM[name]))
             except Exception as exc:
                 self.problems.append(f"Détecteur Haar {name} : {exc}")
 
@@ -432,11 +432,20 @@ class FaceDetector:
     def ok(self) -> bool:
         return self.backend != "aucun"
 
+    # Les deux détecteurs produisent des « candidats » avec un score de confiance 0..1 ;
+    # le seuil est appliqué ensuite (et peut être ajusté par l'apprentissage local).
+    CANDIDATE_FLOOR = 0.15
+    # Normalisation des poids Haar (levelWeights) : centre / échelle par cascade,
+    # étalonnés sur des vrais visages (≈ 0.9) et des faux positifs typiques (≈ 0.25).
+    HAAR_NORM = {"haarcascade_frontalface_default.xml": (2.5, 1.5),
+                 "haarcascade_frontalface_alt2.xml": (55.3, 0.8),
+                 "haarcascade_profileface.xml": (1.0, 0.8)}
+
     # -- YuNet, multi-échelle pour attraper petits ET grands visages ----------
-    def _yunet_detect(self, rgb: np.ndarray, threshold: float) -> list[Box]:
+    def _yunet_candidates(self, rgb: np.ndarray) -> list[Box]:
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         h, w = bgr.shape[:2]
-        self._yunet.setScoreThreshold(threshold)
+        self._yunet.setScoreThreshold(self.CANDIDATE_FLOOR)
         boxes: list[Box] = []
         long_side = max(h, w)
         for t in sorted({min(long_side, t) for t in (640, 1280, 2560)}):
@@ -455,7 +464,7 @@ class FaceDetector:
         return boxes
 
     # -- Haar (secours), de face + de profil des deux côtés -------------------
-    def _haar_detect(self, rgb: np.ndarray, sensitivity: float) -> list[Box]:
+    def _haar_candidates(self, rgb: np.ndarray) -> list[Box]:
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         h, w = gray.shape
         s = min(1.0, 1600 / max(h, w))
@@ -464,33 +473,62 @@ class FaceDetector:
         if min(gray.shape) < 20:
             return []
         gray = cv2.equalizeHist(gray)
-        neighbors = max(2, int(round(2 + (1 - sensitivity) * 6)))
         boxes: list[Box] = []
-        for casc, profile in self._cascades:
+        for casc, profile, (c, k) in self._cascades:
             imgs = [(gray, False)] + ([(cv2.flip(gray, 1), True)] if profile else [])
             for img, flip in imgs:
-                for (x, y, fw, fh) in casc.detectMultiScale(img, 1.1, neighbors, minSize=(20, 20)):
+                rects, _, weights = casc.detectMultiScale3(img, 1.1, 1, minSize=(20, 20), outputRejectLevels=True)
+                for (x, y, fw, fh), wt in zip(np.asarray(rects).reshape(-1, 4), np.ravel(weights)):
+                    score = float(1 / (1 + np.exp(-(float(wt) - c) / k)))
+                    if score < self.CANDIDATE_FLOOR:
+                        continue
                     if flip:
                         x = img.shape[1] - x - fw
-                    boxes.append(Box(int(x / s), int(y / s), int(fw / s), int(fh / s), 0.9))
+                    boxes.append(Box(int(x / s), int(y / s), int(fw / s), int(fh / s), score))
         return boxes
 
-    def detect(self, rgb: np.ndarray, sensitivity: float = 0.5) -> list[Box]:
-        """sensitivity : 0 = prudent (peu de faux positifs) ... 1 = attrape tout."""
+    def candidates(self, rgb: np.ndarray) -> list[Box]:
+        """Toutes les détections possibles (même peu sûres), avec leur score, non fusionnées."""
         if self._yunet is not None:
-            boxes = self._yunet_detect(rgb, 0.85 - 0.6 * sensitivity)
+            boxes = self._yunet_candidates(rgb)
         elif self._cascades:
-            boxes = self._haar_detect(rgb, sensitivity)
+            boxes = self._haar_candidates(rgb)
         else:
             boxes = []
         H, W = rgb.shape[:2]
-        clipped = []
+        out = []
         for b in boxes:
             x0, y0 = max(0, b.x), max(0, b.y)
             x1, y1 = min(W, b.x + b.w), min(H, b.y + b.h)
             if x1 - x0 > 1 and y1 - y0 > 1:
-                clipped.append(Box(x0, y0, x1 - x0, y1 - y0, b.score))
-        return merge_boxes(clipped)
+                out.append(Box(x0, y0, x1 - x0, y1 - y0, b.score))
+        return out
+
+    @staticmethod
+    def base_threshold(sensitivity: float) -> float:
+        """sensitivity : 0 = prudent ... 1 = attrape tout."""
+        return 0.85 - 0.6 * min(1.0, max(0.0, sensitivity))
+
+    def detect(self, rgb: np.ndarray, sensitivity: float = 0.5, threshold: float | None = None) -> list[Box]:
+        """Visages retenus. `threshold` (si fourni) remplace le seuil déduit de la sensibilité."""
+        t = self.base_threshold(sensitivity) if threshold is None else threshold
+        return merge_boxes([b for b in self.candidates(rgb) if b.score >= t])
+
+    def best_score_near(self, rgb: np.ndarray, box: Box) -> float:
+        """Score du meilleur candidat qui recouvre `box` (0 si le détecteur n'a rien vu là).
+        Sert à savoir si un visage ajouté à la main avait été « presque » détecté."""
+        best = 0.0
+        for c in self.candidates(rgb):
+            if _iou(c, box) > 0.3 or (_overlap(c, box) > 0.6 and 0.4 < (c.w * c.h) / max(1, box.w * box.h) < 2.5):
+                best = max(best, c.score)
+        return best
+
+
+def _iou(a: Box, b: Box) -> float:
+    x0, y0 = max(a.x, b.x), max(a.y, b.y)
+    x1, y1 = min(a.x + a.w, b.x + b.w), min(a.y + a.h, b.y + b.h)
+    inter = max(0, x1 - x0) * max(0, y1 - y0)
+    return inter / max(1, a.w * a.h + b.w * b.h - inter)
 
 
 def _overlap(a: Box, b: Box) -> float:

@@ -225,3 +225,15 @@ def test_modele_altere_signale_comme_tel(tmp_path):
     (tmp_path / core.YUNET_FILE).write_bytes(b"x" * 300_000)
     assert core.FaceDetector(models_dir=str(tmp_path), haar_dir=HAAR).tampered
     assert not core.FaceDetector(models_dir="/nulle/part", haar_dir=HAAR).tampered
+
+
+# ------------------------------------------------------- scores / candidats --
+def test_scores_entre_0_et_1_et_seuil():
+    det = core.FaceDetector(haar_dir=HAAR, models_dir="/nulle/part")
+    astro = os.path.join(os.path.dirname(HAAR), "..", "test", "astronaut.jpg")
+    img = core.load_image(astro) if os.path.exists(astro) else noise_img()
+    cands = det.candidates(img)
+    assert all(0 <= c.score <= 1 for c in cands)
+    strict = det.detect(img, threshold=0.99)
+    loose = det.detect(img, threshold=0.2)
+    assert len(strict) <= len(loose)
