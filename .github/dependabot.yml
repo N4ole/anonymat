@@ -5,6 +5,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # OpenCV 5 supprime les cascades Haar (détection de secours) : passage
+      # à faire à la main, avec portage et tests. Les 4.x restent proposées.
+      - dependency-name: opencv-python-headless
+        update-types: ["version-update:semver-major"]
     groups:
       dependances-python:
         patterns: ["*"]
