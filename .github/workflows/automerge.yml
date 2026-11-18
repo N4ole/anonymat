@@ -1,0 +1,46 @@
+# Fusion automatique des mises à jour Dependabot (dépendances Python) quand la CI est verte,
+# puis lancement d'une release correctrice. Aucune intervention humaine nécessaire.
+#
+# Sécurité : le code de la PR n'est jamais exécuté ici (pas de checkout) ; on vérifie que la
+# PR vient de Dependabot, qu'elle ne modifie QUE requirements.txt, et que le commit fusionné
+# est exactement celui que la CI a testé.
+name: Fusion auto Dependabot
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write   # lancer le workflow Release
+
+jobs:
+  merge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/pip/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fusionner puis publier une version correctrice
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/$REPO/pulls?state=open&head=${REPO%%/*}:$BRANCH" --jq '.[0].number // empty')
+          if [[ -z "$pr" ]]; then echo "Aucune PR ouverte pour $BRANCH."; exit 0; fi
+          author=$(gh api "repos/$REPO/pulls/$pr" --jq .user.login)
+          head=$(gh api "repos/$REPO/pulls/$pr" --jq .head.sha)
+          files=$(gh api "repos/$REPO/pulls/$pr/files" --jq '.[].filename' | sort -u)
+          if [[ "$author" != "dependabot[bot]" || "$head" != "$SHA" || "$files" != "requirements.txt" ]]; then
+            echo "::warning::PR #$pr non fusionnée automatiquement (auteur=$author, fichiers=$files)."; exit 0
+          fi
+          gh pr merge "$pr" -R "$REPO" --squash --delete-branch --match-head-commit "$SHA"
+          gh workflow run release.yml -R "$REPO" -f auto_patch=true
+          echo "PR #$pr fusionnée, release correctrice lancée."

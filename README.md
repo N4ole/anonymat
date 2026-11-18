@@ -93,12 +93,17 @@ Si le téléchargement est bloqué, place `face_detection_yunet_2023mar.onnx` (O
 
 ### Automatisation GitHub
 
+Le projet se maintient tout seul :
+
 | Workflow | Quand | Ce qu'il fait |
 |---|---|---|
-| **CI** | chaque push / pull request | lint (ruff), tests Linux, puis compilation et auto-test du `.exe` sous Windows (artefact téléchargeable 30 jours) |
-| **Release** | quand `version.py` change sur `main` (ou étiquette `vX.Y.Z`, ou à la main) | publie la release : `.exe`, `SHA256SUMS.txt`, attestation de provenance, notes tirées du [CHANGELOG](CHANGELOG.md) |
+| **CI** | chaque push / pull request, et chaque mois | lint (ruff), tests Linux, compilation et auto-test du `.exe` sous Windows, répétition de la release |
+| **Dependabot** | chaque semaine | propose les mises à jour des dépendances Python |
+| **Fusion auto** | quand la CI d'une PR Dependabot est verte | fusionne la PR (si elle ne touche que `requirements.txt`) et lance une release correctrice |
+| **Release** | changement de `version.py`, étiquette `vX.Y.Z`, mise à jour fusionnée, ou chaque semaine | publie la release : `.exe`, `SHA256SUMS.txt`, attestation de provenance, notes tirées du [CHANGELOG](CHANGELOG.md). Pour une mise à jour de dépendance, la version correctrice (6.0.1 → 6.0.2…) et son entrée de CHANGELOG sont générées automatiquement |
 | **CodeQL** | chaque push + chaque semaine | analyse de sécurité du code |
-| **Dependabot** | chaque semaine | propose les mises à jour des dépendances et des actions (testées par la CI) |
+
+En cas d'échec (casse due à GitHub ou à une dépendance), GitHub envoie un e-mail. Une mise à jour qui casse les tests n'est jamais fusionnée.
 
 Publier une version : voir [CONTRIBUTING.md](CONTRIBUTING.md#publier-une-version).
 

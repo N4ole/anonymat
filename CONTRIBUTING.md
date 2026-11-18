@@ -26,8 +26,13 @@ Règles du projet :
 
 ## Publier une version
 
+**Rien à faire pour les mises à jour de sécurité** : Dependabot propose la mise à jour, la CI la teste, elle est fusionnée automatiquement, puis une version correctrice est publiée avec son entrée de CHANGELOG.
+
+Pour une nouvelle fonctionnalité :
 1. Augmenter `__version__` dans `version.py` (ex. `6.1.0`).
 2. Ajouter la section `## [6.1.0] - AAAA-MM-JJ` dans `CHANGELOG.md`.
 3. Committer et pousser sur `main`.
 
-Le workflow **Release** compile le `.exe`, publie la release `v6.1.0` avec `SHA256SUMS.txt`, une attestation de provenance et les notes du CHANGELOG. Il s'arrête si la section du CHANGELOG manque. On peut aussi le lancer à la main (*Actions → Release → Run workflow*) ou en poussant une étiquette `v6.1.0`.
+Le workflow **Release** compile le `.exe`, publie la release `v6.1.0` avec `SHA256SUMS.txt`, une attestation de provenance et les notes du CHANGELOG. Il s'arrête si la section du CHANGELOG manque.
+
+Les actions GitHub sont épinglées sur leur version majeure (`@v7`…), qui reçoit les correctifs automatiquement. Un passage de version majeure se fait à la main, car un bot ne peut pas fusionner une PR qui modifie des workflows.

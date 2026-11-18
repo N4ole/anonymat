@@ -6,6 +6,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "23 5 1 * *"   # contrôle mensuel : une casse due à GitHub/Windows est signalée par e-mail
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -19,8 +21,8 @@ jobs:
     name: Lint (ruff)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install ruff==0.17.5
@@ -30,8 +32,8 @@ jobs:
     name: Tests (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -43,3 +45,19 @@ jobs:
     name: Windows
     needs: [lint, tests]
     uses: ./.github/workflows/build-windows.yml
+
+  release-dry-run:
+    name: Répétition de la release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: AnonymiseurVisages-windows
+          path: dist
+      - name: Empreintes et notes (sans publier)
+        run: |
+          (cd dist && sha256sum *.exe)
+          v=$(python3 -c 'from version import __version__; print(__version__)')
+          python3 .github/scripts/changelog_notes.py "$v" > /dev/null && echo "Notes du CHANGELOG présentes pour $v"

@@ -3,6 +3,16 @@
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), versions selon [SemVer](https://semver.org/lang/fr/).
 Chaque section `## [X.Y.Z]` sert de notes à la release correspondante.
 
+## [6.0.1] - 2026-11-18
+
+### Ajouté
+- Licence **MIT** et mentions des composants tiers (`THIRD_PARTY_NOTICES.md`), incluses dans le `.exe`.
+- Mises à jour entièrement automatiques : les mises à jour de dépendances testées par la CI sont fusionnées puis publiées en version correctrice, sans intervention.
+
+### Modifié
+- Lecture des photos HEIC via `pi-heif` (lecture seule). Le `.exe` n'embarque plus l'encodeur x265 (licence GPL, 22 Mo) : il est plus léger et compatible avec la licence MIT.
+- Actions GitHub mises à jour (checkout v7, setup-python v7, cache v6, artefacts v7/v8, CodeQL v4, attestation v4).
+
 ## [6.0.0] - 2026-11-18
 
 ### Ajouté

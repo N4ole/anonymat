@@ -1,4 +1,7 @@
-# Mises à jour automatiques proposées en pull request (la CI les teste avant fusion).
+# Mises à jour automatiques des dépendances Python : PR testée par la CI, fusionnée
+# automatiquement si tout est vert (automerge.yml), puis release correctrice (release.yml).
+# Les actions GitHub sont épinglées sur leur version majeure, qui reçoit les correctifs
+# toute seule (un bot ne peut pas fusionner une PR qui modifie des workflows).
 version: 2
 updates:
   - package-ecosystem: pip
@@ -12,11 +15,4 @@ updates:
         update-types: ["version-update:semver-major"]
     groups:
       dependances-python:
-        patterns: ["*"]
-  - package-ecosystem: github-actions
-    directory: /
-    schedule:
-      interval: weekly
-    groups:
-      actions-github:
         patterns: ["*"]

@@ -1,7 +1,9 @@
-# Release automatique :
-#  * en augmentant __version__ dans version.py (poussé sur main) ;
-#  * ou en poussant une étiquette vX.Y.Z ;
-#  * ou à la main (onglet Actions > Release > Run workflow).
+# Release automatique, sans intervention :
+#  * __version__ modifié dans version.py et poussé sur main  -> release de cette version ;
+#  * étiquette vX.Y.Z poussée                                -> release de cette version ;
+#  * mise à jour de dépendance fusionnée (automerge.yml), contrôle hebdomadaire,
+#    ou lancement manuel avec « auto_patch »                 -> si du code a changé depuis la
+#    dernière release : version correctrice X.Y.(Z+1) + CHANGELOG générés, puis release.
 # Publie le .exe, son empreinte SHA-256, une attestation de provenance et les notes du CHANGELOG.
 name: Release
 
@@ -10,7 +12,14 @@ on:
     branches: [main]
     paths: [version.py]
     tags: ["v*.*.*"]
+  schedule:
+    - cron: "41 6 * * 2"
   workflow_dispatch:
+    inputs:
+      auto_patch:
+        description: Publier une version correctrice si du code a changé depuis la dernière release
+        type: boolean
+        default: true
 
 concurrency:
   group: release
@@ -23,40 +32,63 @@ jobs:
   prepare:
     name: Préparer
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # commit de la version correctrice
     outputs:
       version: ${{ steps.check.outputs.version }}
       tag: ${{ steps.check.outputs.tag }}
       publish: ${{ steps.check.outputs.publish }}
+      ref: ${{ steps.check.outputs.ref }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
         with:
-          python-version: "3.12"
+          fetch-depth: 0
       - name: Vérifier version, étiquette et CHANGELOG
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
+          AUTO: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.auto_patch) }}
         run: |
-          v=$(python -c 'from version import __version__; print(__version__)')
-          tag="v$v"
+          set -euo pipefail
+          version() { python3 -c 'from version import __version__; print(__version__)'; }
+          v=$(version); tag="v$v"; ref=$(git rev-parse HEAD)
           if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "$tag" ]]; then
             echo "::error::L'étiquette $GITHUB_REF_NAME ne correspond pas à version.py ($v)"; exit 1
           fi
-          python .github/scripts/changelog_notes.py "$v" > /dev/null
+          publish=true
           if gh release view "$tag" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            echo "La release $tag existe déjà : rien à publier."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
+            publish=false
+            if [[ "$AUTO" == "true" ]]; then
+              # Changements de code depuis la dernière release (la doc seule ne compte pas)
+              git fetch --tags --force -q
+              mapfile -t changes < <(git log "$tag"..HEAD --format='%s' -- requirements.txt '*.py' '*.spec' haar models)
+              if (( ${#changes[@]} )); then
+                git config user.name "github-actions[bot]"
+                git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                v=$(python3 .github/scripts/bump_patch.py "${changes[@]}"); tag="v$v"
+                git commit -qam "Version $v (correctifs automatiques)"
+                git push -q origin HEAD:main
+                ref=$(git rev-parse HEAD); publish=true
+                echo "Version correctrice $v créée (${#changes[@]} changement(s))."
+              else
+                echo "Aucun changement de code depuis $tag : rien à publier."
+              fi
+            else
+              echo "La release $tag existe déjà : rien à publier."
+            fi
           fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$publish" == "true" ]]; then
+            python3 .github/scripts/changelog_notes.py "$v" > /dev/null
+          fi
+          { echo "version=$v"; echo "tag=$tag"; echo "publish=$publish"; echo "ref=$ref"; } >> "$GITHUB_OUTPUT"
 
   build:
     name: Windows
     needs: prepare
     if: needs.prepare.outputs.publish == 'true'
     uses: ./.github/workflows/build-windows.yml
+    with:
+      ref: ${{ needs.prepare.outputs.ref }}
 
   publish:
     name: Publier
@@ -67,8 +99,10 @@ jobs:
       id-token: write       # attestation de provenance
       attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+      - uses: actions/download-artifact@v8
         with:
           name: AnonymiseurVisages-windows
           path: dist
@@ -76,7 +110,7 @@ jobs:
         working-directory: dist
         run: sha256sum *.exe | tee SHA256SUMS.txt
       - name: Attestation de provenance (prouve que le .exe vient de cette CI)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/*.exe
       - name: Créer la release
@@ -84,6 +118,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
           TAG: ${{ needs.prepare.outputs.tag }}
+          REF: ${{ needs.prepare.outputs.ref }}
         run: |
           python3 .github/scripts/changelog_notes.py "$VERSION" > notes.md
           {
@@ -99,5 +134,5 @@ jobs:
             echo '```'
           } >> notes.md
           gh release create "$TAG" dist/*.exe dist/SHA256SUMS.txt \
-            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --repo "$GITHUB_REPOSITORY" --target "$REF" \
             --title "Anonymat $VERSION" --notes-file notes.md --latest
