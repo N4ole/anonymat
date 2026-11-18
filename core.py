@@ -195,19 +195,26 @@ def merge_boxes(boxes: list[Box], thr: float = 0.5) -> list[Box]:
 # --------------------------------------------------------------------------- #
 #  Anonymisation
 # --------------------------------------------------------------------------- #
-def _destroy(region: np.ndarray, blocks: int, rng: np.random.Generator) -> np.ndarray:
+def _destroy(region: np.ndarray, blocks: int, rng: np.random.Generator, noise: int = 18) -> np.ndarray:
     """Écrase la zone à `blocks` x `blocks` pixels + bruit : l'info d'origine est perdue."""
     h, w = region.shape[:2]
     bw = max(1, min(blocks, w))
     bh = max(1, int(round(bw * h / max(w, 1))))
     small = cv2.resize(region, (bw, bh), interpolation=cv2.INTER_AREA).astype(np.int16)
-    small += rng.integers(-18, 19, small.shape, dtype=np.int16)  # bruit aléatoire
+    small += rng.integers(-noise, noise + 1, small.shape, dtype=np.int16)  # bruit aléatoire
     return np.clip(small, 0, 255).astype(np.uint8)
 
 
 def anonymize(rgb: np.ndarray, boxes: list[Box], mode: str = "caviardage",
               shape: str = "rectangle", margin: float = 0.25,
-              color: tuple[int, int, int] = (0, 0, 0)) -> np.ndarray:
+              color: tuple[int, int, int] = (0, 0, 0), strength: float = 0.5) -> np.ndarray:
+    """strength : 0 = effet léger ... 1 = effet maximal.
+
+    Même au minimum, la zone est réduite à 10 pixels de large au plus : la force
+    change l'aspect, jamais le fait que l'information d'origine est détruite.
+    """
+    s = min(1.0, max(0.0, strength))
+    noise = int(10 + 25 * s)
     out = rgb.copy()
     H, W = out.shape[:2]
     rng = np.random.default_rng()  # graine aléatoire : rien de reproductible
@@ -221,12 +228,12 @@ def anonymize(rgb: np.ndarray, boxes: list[Box], mode: str = "caviardage",
             patch = np.empty_like(region)
             patch[:] = color
         elif mode == "pixel":
-            small = _destroy(region, 7, rng)
+            small = _destroy(region, round(10 - 6 * s), rng, noise)  # 10 -> 4 blocs
             patch = cv2.resize(small, (e.w, e.h), interpolation=cv2.INTER_NEAREST)
         else:  # flou destructif : on détruit d'abord, puis on lisse pour l'esthétique
-            small = _destroy(region, 5, rng)
+            small = _destroy(region, round(10 - 7 * s), rng, noise)  # 10 -> 3 blocs
             patch = cv2.resize(small, (e.w, e.h), interpolation=cv2.INTER_LINEAR)
-            k = max(3, (min(e.w, e.h) // 3) | 1)
+            k = max(3, int(min(e.w, e.h) * (0.15 + 0.45 * s)) | 1)
             patch = cv2.GaussianBlur(patch, (k, k), 0)
 
         if shape == "ellipse":

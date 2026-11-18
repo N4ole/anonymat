@@ -75,6 +75,7 @@ class App(tk.Tk):
         threading.Thread(target=self._worker, daemon=True).start()
 
         self._build_ui()
+        self._on_mode()
         self.after(100, self._poll)
         if initial:
             self.after(200, lambda: self.add_paths(initial))
@@ -100,7 +101,7 @@ class App(tk.Tk):
         cb = ttk.Combobox(top, textvariable=self.mode, values=list(core.MODES.values()),
                           state="readonly", width=34)
         cb.pack(side="left", padx=4)
-        cb.bind("<<ComboboxSelected>>", lambda e: self.redraw())
+        cb.bind("<<ComboboxSelected>>", lambda e: self._on_mode())
 
         ttk.Label(top, text="Forme :").pack(side="left", padx=(8, 0))
         self.shape = tk.StringVar(value="Rectangle")
@@ -125,10 +126,15 @@ class App(tk.Tk):
         self.margin = tk.DoubleVar(value=0.30)
         ttk.Scale(opts, from_=0.0, to=0.8, variable=self.margin, length=140,
                   command=lambda v: self.redraw()).pack(side="left", padx=4)
+        self.strength_lbl = ttk.Label(opts, text="   Force de l'effet :")
+        self.strength_lbl.pack(side="left")
+        self.strength = tk.DoubleVar(value=0.6)
+        self.strength_scale = ttk.Scale(opts, from_=0.0, to=1.0, variable=self.strength, length=140,
+                                        command=lambda v: self._on_strength())
+        self.strength_scale.pack(side="left", padx=4)
+        self.strength_val = ttk.Label(opts, text="60 %", width=5)
+        self.strength_val.pack(side="left")
         self.out_dir = tk.StringVar(value="")
-        ttk.Button(opts, text="Dossier de sortie…", command=self.pick_out).pack(side="right")
-        self.out_lbl = ttk.Label(opts, text="Sortie : sous-dossier « anonymise »", foreground="#555")
-        self.out_lbl.pack(side="right", padx=6)
 
         # Corps : liste + canvas
         body = ttk.PanedWindow(self, orient="horizontal")
@@ -169,11 +175,13 @@ class App(tk.Tk):
         bottom.pack(fill="x")
         ttk.Button(bottom, text="✔ Anonymiser et enregistrer", style="Big.TButton",
                    command=self.export).pack(side="right")
-        self.progress = ttk.Progressbar(bottom, length=240, mode="determinate")
+        self.progress = ttk.Progressbar(bottom, length=160, mode="determinate")
         self.progress.pack(side="right", padx=10)
+        ttk.Button(bottom, text="📂 Sortie…", command=self.pick_out).pack(side="right")
+        self.out_lbl = ttk.Label(bottom, text="→ sous-dossier « anonymise »", foreground="#555")
+        self.out_lbl.pack(side="right", padx=6)
         engine = "IA (YuNet)" if self.detector.backend == "yunet" else "Haar (basique)"
-        self.status = ttk.Label(bottom, text=f"Détection : {engine}.  ⚠ Vérifie chaque image "
-                                             "(un visage de dos, masqué ou minuscule peut être raté).")
+        self.status = ttk.Label(bottom, text=f"Détection : {engine}.  ⚠ Vérifie chaque image.")
         self.status.pack(side="left")
 
     # ------------------------------------------------------------- fichiers --
@@ -192,7 +200,7 @@ class App(tk.Tk):
         d = filedialog.askdirectory(title="Dossier où enregistrer les images anonymisées")
         if d:
             self.out_dir.set(d)
-            self.out_lbl.configure(text=f"Sortie : {d}")
+            self.out_lbl.configure(text=f"→ {d if len(d) < 40 else '…' + d[-38:]}")
 
     def add_paths(self, paths: list[str]) -> None:
         known = {i.path for i in self.items}
@@ -332,6 +340,21 @@ class App(tk.Tk):
         self.listbox.see(idx)
         self.on_select()
 
+    def _on_mode(self) -> None:
+        # Le caviardage est déjà « 100 % » : la force n'a pas de sens, on grise le curseur.
+        state = ["disabled"] if self._mode_key() == "caviardage" else ["!disabled"]
+        self.strength_scale.state(state)
+        self.strength_lbl.state(state)
+        self.strength_val.state(state)
+        if self._mode_key() != "caviardage" and not self.preview.get():
+            self.preview.set(True)  # on montre directement l'effet du curseur
+        self.redraw()
+
+    def _on_strength(self) -> None:
+        self.strength_val.configure(text=f"{round(self.strength.get() * 100)} %")
+        if self.preview.get():
+            self.redraw()
+
     def _mode_key(self) -> str:
         return next(k for k, v in core.MODES.items() if v == self.mode.get())
 
@@ -346,7 +369,8 @@ class App(tk.Tk):
         rgb = self.current_rgb
         boxes = self.current.boxes
         if self.preview.get():
-            rgb = core.anonymize(rgb, boxes, self._mode_key(), self.shape.get().lower(), self.margin.get())
+            rgb = core.anonymize(rgb, boxes, self._mode_key(), self.shape.get().lower(), self.margin.get(),
+                                 strength=self.strength.get())
         H, W = rgb.shape[:2]
         cw, ch = max(self.canvas.winfo_width(), 50), max(self.canvas.winfo_height(), 50)
         self.scale = min(cw / W, ch / H, 1.0)
@@ -433,6 +457,7 @@ class App(tk.Tk):
             return
 
         mode, shape, margin = self._mode_key(), self.shape.get().lower(), self.margin.get()
+        strength = self.strength.get()
         out_dir = self.out_dir.get() or None
         todo = [i for i in self.items if i.state != "erreur"]
         self.progress.configure(maximum=len(todo), value=0)
@@ -443,7 +468,7 @@ class App(tk.Tk):
             for n, it in enumerate(todo, 1):
                 try:
                     rgb = core.load_image(it.path)
-                    out = core.anonymize(rgb, it.boxes, mode, shape, margin)
+                    out = core.anonymize(rgb, it.boxes, mode, shape, margin, strength=strength)
                     last = core.output_path(it.path, out_dir)
                     core.save_clean(out, last)
                     it.state = "fait"
