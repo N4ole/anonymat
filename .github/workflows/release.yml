@@ -28,8 +28,8 @@ jobs:
       tag: ${{ steps.check.outputs.tag }}
       publish: ${{ steps.check.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Vérifier version, étiquette et CHANGELOG
@@ -67,8 +67,8 @@ jobs:
       id-token: write       # attestation de provenance
       attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: AnonymiseurVisages-windows
           path: dist
@@ -76,7 +76,7 @@ jobs:
         working-directory: dist
         run: sha256sum *.exe | tee SHA256SUMS.txt
       - name: Attestation de provenance (prouve que le .exe vient de cette CI)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/*.exe
       - name: Créer la release
