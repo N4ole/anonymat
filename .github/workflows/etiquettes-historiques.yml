@@ -1,0 +1,26 @@
+# Ponctuel : publie les étiquettes historiques v1..v6 (une par version de développement).
+# Idempotent ; supprimé du dépôt après exécution.
+name: Étiquettes historiques
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/etiquettes-historiques.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  tags:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Créer v1..v6
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/$GITHUB_REPOSITORY/git/refs -f ref=refs/tags/v1 -f sha=3f8e2d17cc447168b2c0c9c1430b37a8c61cb0bf > /dev/null 2>&1 && echo "v1 créée" || echo "v1 déjà présente"
+          gh api repos/$GITHUB_REPOSITORY/git/refs -f ref=refs/tags/v2 -f sha=44f8830cd55818075f41b932c13c0a724d138d43 > /dev/null 2>&1 && echo "v2 créée" || echo "v2 déjà présente"
+          gh api repos/$GITHUB_REPOSITORY/git/refs -f ref=refs/tags/v3 -f sha=11f58e7360c354bd1b74c28973555d530ae348be > /dev/null 2>&1 && echo "v3 créée" || echo "v3 déjà présente"
+          gh api repos/$GITHUB_REPOSITORY/git/refs -f ref=refs/tags/v4 -f sha=bff22c5af86bf4ea34760e013a4373c758b1a9bf > /dev/null 2>&1 && echo "v4 créée" || echo "v4 déjà présente"
+          gh api repos/$GITHUB_REPOSITORY/git/refs -f ref=refs/tags/v5 -f sha=b29326a49e48476c473ddd2161a1a8ccbec62fe9 > /dev/null 2>&1 && echo "v5 créée" || echo "v5 déjà présente"
+          gh api repos/$GITHUB_REPOSITORY/git/refs -f ref=refs/tags/v6 -f sha=077e00643b60d7ed98d81f59fe6de171170c1348 > /dev/null 2>&1 && echo "v6 créée" || echo "v6 déjà présente"
