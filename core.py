@@ -24,9 +24,9 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
-try:  # photos iPhone (.heic)
-    import pillow_heif
-    pillow_heif.register_heif_opener()
+try:  # photos iPhone (.heic) : pi-heif = lecture seule, sans encodeur x265 (GPL)
+    import pi_heif
+    pi_heif.register_heif_opener()
     HEIF_OK = True
 except Exception:  # pragma: no cover - dépend de l'installation
     HEIF_OK = False

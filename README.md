@@ -5,6 +5,7 @@
 [![CodeQL](https://github.com/N4ole/anonymat/actions/workflows/codeql.yml/badge.svg)](https://github.com/N4ole/anonymat/actions/workflows/codeql.yml)
 ![Windows](https://img.shields.io/badge/Windows-un%20seul%20.exe-0a84ff)
 ![Hors ligne](https://img.shields.io/badge/r%C3%A9seau-jamais-1b7a34)
+[![Licence MIT](https://img.shields.io/github/license/N4ole/anonymat)](LICENSE)
 
 Logiciel Windows (un seul `.exe`, rien à installer) qui cache les visages sur des photos, avec un **vrai anonymat par défaut** : le visage est détruit, pas seulement flouté, et toutes les informations cachées des photos (GPS, appareil…) sont supprimées. Il fonctionne **entièrement hors ligne**.
 
@@ -111,3 +112,7 @@ Publier une version : voir [CONTRIBUTING.md](CONTRIBUTING.md#publier-une-version
 - `tools_model.py` – téléchargement + vérification du modèle YuNet
 - `AnonymiseurVisages.spec`, `build.bat` – compilation ; `.github/` – CI, release, CodeQL, Dependabot, modèles d'issues
 - `haar/` – détecteur de secours (OpenCV 4.x)
+
+## Licence
+
+[MIT](LICENSE) : libre d'utilisation, de modification et de redistribution. Les composants intégrés au `.exe` (OpenCV, YuNet, libheif…) gardent leur propre licence : voir [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

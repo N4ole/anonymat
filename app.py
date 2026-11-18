@@ -1167,6 +1167,8 @@ class App(tk.Tk):
             "Confidentialité : le programme ne se connecte JAMAIS à Internet. Les photos ne quittent "
             "pas ton ordinateur ; seuls quelques réglages et des statistiques numériques "
             "d'apprentissage sont gardés dans %APPDATA%\\AnonymiseurVisages.\n\n"
+            "Licence MIT. Composants tiers (OpenCV, YuNet, libheif…) : voir THIRD_PARTY_NOTICES.md "
+            "dans le dépôt.\n\n"
             f"Code source, téléchargements et vérification des .exe :\n{REPO_URL}")
 
     _closing = False

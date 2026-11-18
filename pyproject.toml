@@ -2,6 +2,8 @@
 name = "anonymat"
 description = "Anonymiseur de visages : cache les visages sur des photos de façon irréversible (Windows, un seul .exe)."
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 dynamic = ["version"]
 
 [tool.ruff]

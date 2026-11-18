@@ -146,11 +146,10 @@ def test_effacement_securise(tmp_path):
     assert os.listdir(tmp_path) == []
 
 
-@pytest.mark.skipif(not core.HEIF_OK, reason="pillow-heif absent")
-def test_heic(tmp_path):
-    import pillow_heif
-    pillow_heif.from_pillow(Image.fromarray(noise_img(64, 64))).save(str(tmp_path / "i.heic"))
-    assert core.load_image(str(tmp_path / "i.heic")).shape == (64, 64, 3)
+@pytest.mark.skipif(not core.HEIF_OK, reason="pi-heif absent")
+def test_heic():
+    sample = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "synthetique.heic")
+    assert core.load_image(sample).shape == (64, 64, 3)
     assert core.output_ext("x.heic") == ".jpg"
 
 
