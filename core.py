@@ -136,7 +136,7 @@ class Box:
     manual: bool = False
     kind: str = "visage"  # visage | objet
 
-    def expanded(self, margin: float, img_w: int, img_h: int) -> "Box":
+    def expanded(self, margin: float, img_w: int, img_h: int) -> Box:
         """Agrandit la zone de `margin` (0.3 = +30 %) en restant dans l'image."""
         dx, dy_top, dy_bot = self.w * margin, self.h * margin * 1.3, self.h * margin
         x0 = max(0, int(self.x - dx))
@@ -154,7 +154,7 @@ class Box:
         y1 = int(np.ceil(self.y + self.h + self.h * margin))
         return x0, y0, max(x1, x0 + 1), max(y1, y0 + 1)
 
-    def scaled(self, s: float) -> "Box":
+    def scaled(self, s: float) -> Box:
         return Box(int(self.x * s), int(self.y * s), max(1, int(round(self.w * s))),
                    max(1, int(round(self.h * s))), self.score, self.manual, self.kind)
 
@@ -478,7 +478,7 @@ class FaceDetector:
             imgs = [(gray, False)] + ([(cv2.flip(gray, 1), True)] if profile else [])
             for img, flip in imgs:
                 rects, _, weights = casc.detectMultiScale3(img, 1.1, 1, minSize=(20, 20), outputRejectLevels=True)
-                for (x, y, fw, fh), wt in zip(np.asarray(rects).reshape(-1, 4), np.ravel(weights)):
+                for (x, y, fw, fh), wt in zip(np.asarray(rects).reshape(-1, 4), np.ravel(weights), strict=True):
                     score = float(1 / (1 + np.exp(-(float(wt) - c) / k)))
                     if score < self.CANDIDATE_FLOOR:
                         continue
@@ -664,12 +664,12 @@ def anonymize(rgb: np.ndarray, boxes: list[Box], mode: str = "flou",
 
         if alpha is None and shape == "ellipse":
             alpha = _ellipse_mask(rw, rh)
-        t, l = pad[0], pad[2]
+        top, left = pad[0], pad[2]
         vh, vw = visible.shape[:2]
-        patch = patch[t:t + vh, l:l + vw]
+        patch = patch[top:top + vh, left:left + vw]
         if alpha is None:
             visible[:] = patch
         else:
-            a = alpha[t:t + vh, l:l + vw, None]
+            a = alpha[top:top + vh, left:left + vw, None]
             visible[:] = (patch * a + visible * (1 - a)).round().astype(np.uint8)
     return out

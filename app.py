@@ -24,6 +24,7 @@ from PIL import Image, ImageTk
 
 import core
 import learning
+from version import REPO_URL, __version__
 
 APP_NAME = "Anonymiseur de visages"
 PROXY_SIDE = 1600       # taille max de l'image d'aperçu (fluidité sur les photos 48 Mpx)
@@ -133,9 +134,9 @@ class Item:
 class App(tk.Tk):
     def __init__(self, initial: list[str]) -> None:
         super().__init__()
-        self.title(APP_NAME)
+        self.title(f"{APP_NAME} {__version__}")
         self.geometry("1240x820")
-        self.minsize(1000, 640)
+        self.minsize(1040, 640)
         try:
             self.iconbitmap(core.resource_path("icon.ico"))
         except Exception:
@@ -223,6 +224,9 @@ class App(tk.Tk):
         self.btn_adv = ttk.Checkbutton(top, text="⚙ Options avancées", variable=self.advanced,
                                        command=self._toggle_advanced)
         self.btn_adv.pack(side="right")
+        b_about = ttk.Button(top, text="ⓘ", width=3, command=self.about)
+        b_about.pack(side="right", padx=(0, 6))
+        Tooltip(b_about, "À propos : version, confidentialité, code source.")
 
         # --- Panneau avancé (caché par défaut) ---------------------------------
         self.adv = ttk.Frame(self, padding=(8, 0, 8, 4))
@@ -534,7 +538,8 @@ class App(tk.Tk):
     def set_draw(self, kind: str | None) -> None:
         self.draw_kind = kind
         if kind == "visage":
-            self.hint_text = "✏  Dessine un rectangle autour du visage oublié\n(maintiens le clic gauche et fais glisser · Échap pour annuler)"
+            self.hint_text = ("✏  Dessine un rectangle autour du visage oublié\n"
+                              "(maintiens le clic gauche et fais glisser · Échap pour annuler)")
         elif kind == "objet":
             self.hint_text = "✏  Dessine un rectangle sur ce qu'il faut cacher\n(badge, plaque, tatouage… · Échap pour annuler)"
         else:
@@ -989,7 +994,8 @@ class App(tk.Tk):
         if self.sel_box is not None:
             self._remove_box(self.sel_box)
         elif self.current and self.current.boxes:
-            self.flash_hint("Clique d'abord sur un cadre pour le sélectionner (il devient jaune),\nou clique sur sa petite croix ✕.")
+            self.flash_hint("Clique d'abord sur un cadre pour le sélectionner (il devient jaune),\n"
+                            "ou clique sur sa petite croix ✕.")
 
     def _remove_box(self, b: core.Box) -> None:
         if b in self.current.boxes:
@@ -1150,6 +1156,19 @@ class App(tk.Tk):
         elif not last:
             messagebox.showwarning(APP_NAME, msg)
 
+    def about(self) -> None:
+        engine = {"yunet": "IA (YuNet, empreinte vérifiée)", "haar": "basique (Haar)",
+                  "aucun": "aucune"}[self.detector.backend]
+        messagebox.showinfo(
+            f"À propos – {APP_NAME}",
+            f"{APP_NAME} – version {__version__}\n\n"
+            f"Détection : {engine}\n"
+            f"Photos iPhone (HEIC) : {'oui' if core.HEIF_OK else 'non'}\n\n"
+            "Confidentialité : le programme ne se connecte JAMAIS à Internet. Les photos ne quittent "
+            "pas ton ordinateur ; seuls quelques réglages et des statistiques numériques "
+            "d'apprentissage sont gardés dans %APPDATA%\\AnonymiseurVisages.\n\n"
+            f"Code source, téléchargements et vérification des .exe :\n{REPO_URL}")
+
     _closing = False
     _handles: list = []
     _export_start = 0.0
@@ -1176,6 +1195,7 @@ def selftest(argv: list[str]) -> int:
     log_path = argv[i + 1] if 0 <= i < len(argv) - 1 else None
     lines, ok = [], True
     det = core.FaceDetector()
+    lines.append(f"version={__version__}")
     lines.append(f"backend={det.backend} heic={core.HEIF_OK}")
     if det.tampered or not core.HEIF_OK:
         ok = False

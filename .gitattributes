@@ -1,0 +1,7 @@
+# Fins de ligne normalisées dans le dépôt ; les .bat DOIVENT être en CRLF sous Windows.
+* text=auto
+*.bat text eol=crlf
+*.ico binary
+*.onnx binary
+*.png binary
+*.jpg binary

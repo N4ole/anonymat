@@ -1,0 +1,21 @@
+[project]
+name = "anonymat"
+description = "Anonymiseur de visages : cache les visages sur des photos de façon irréversible (Windows, un seul .exe)."
+requires-python = ">=3.10"
+dynamic = ["version"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py310"
+extend-exclude = ["build", "dist", ".venv"]
+
+[tool.ruff.lint]
+# erreurs, pyflakes, avertissements, bugbear, modernisation, imports triés
+select = ["E", "F", "W", "B", "UP", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"*.spec" = ["F821"]  # Analysis, PYZ, EXE sont injectés par PyInstaller
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"
