@@ -1,0 +1,17 @@
+# Mises à jour automatiques proposées en pull request (la CI les teste avant fusion).
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      dependances-python:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-github:
+        patterns: ["*"]

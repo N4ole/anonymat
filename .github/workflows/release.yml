@@ -1,0 +1,103 @@
+# Release automatique :
+#  * en augmentant __version__ dans version.py (poussé sur main) ;
+#  * ou en poussant une étiquette vX.Y.Z ;
+#  * ou à la main (onglet Actions > Release > Run workflow).
+# Publie le .exe, son empreinte SHA-256, une attestation de provenance et les notes du CHANGELOG.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [version.py]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Préparer
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Vérifier version, étiquette et CHANGELOG
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(python -c 'from version import __version__; print(__version__)')
+          tag="v$v"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "::error::L'étiquette $GITHUB_REF_NAME ne correspond pas à version.py ($v)"; exit 1
+          fi
+          python .github/scripts/changelog_notes.py "$v" > /dev/null
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "La release $tag existe déjà : rien à publier."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Windows
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    uses: ./.github/workflows/build-windows.yml
+
+  publish:
+    name: Publier
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # créer l'étiquette et la release
+      id-token: write       # attestation de provenance
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: AnonymiseurVisages-windows
+          path: dist
+      - name: Empreintes SHA-256
+        working-directory: dist
+        run: sha256sum *.exe | tee SHA256SUMS.txt
+      - name: Attestation de provenance (prouve que le .exe vient de cette CI)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.exe
+      - name: Créer la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          python3 .github/scripts/changelog_notes.py "$VERSION" > notes.md
+          {
+            echo
+            echo "---"
+            echo "### Vérifier le téléchargement"
+            echo '```powershell'
+            echo "Get-FileHash .\\AnonymiseurVisages-$VERSION-windows-x64.exe -Algorithm SHA256"
+            echo '```'
+            echo "doit donner la valeur de \`SHA256SUMS.txt\`. Avec GitHub CLI, preuve que le .exe a été compilé par la CI de ce dépôt :"
+            echo '```'
+            echo "gh attestation verify AnonymiseurVisages-$VERSION-windows-x64.exe -R $GITHUB_REPOSITORY"
+            echo '```'
+          } >> notes.md
+          gh release create "$TAG" dist/*.exe dist/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Anonymat $VERSION" --notes-file notes.md --latest
