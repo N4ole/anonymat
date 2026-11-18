@@ -1,5 +1,5 @@
 # Versions testées (figées pour des compilations reproductibles)
-opencv-python-headless==4.14.0.94
+opencv-python-headless==5.0.0.93
 numpy==2.5.5
 pillow==13.0.0
 pillow-heif==1.8.1
