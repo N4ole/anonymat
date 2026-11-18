@@ -1,0 +1,19 @@
+# Compile le .exe sur un runner Windows de GitHub (pas besoin de Python en local).
+# Onglet Actions > "Build exe" > Run workflow, puis télécharger l'artefact.
+name: Build exe
+on: [workflow_dispatch, push]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Build
+        shell: cmd
+        run: |
+          pip install -r requirements.txt
+          curl -L --fail -o models\face_detection_yunet_2023mar.onnx https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+          pyinstaller --noconfirm --onefile --windowed --name AnonymiseurVisages --icon icon.ico --add-data "icon.ico;." --add-data "haar;haar" --add-data "models;models" --hidden-import PIL._tkinter_finder app.py
+      - uses: actions/upload-artifact@v4
+        with: { name: AnonymiseurVisages, path: dist/AnonymiseurVisages.exe }
