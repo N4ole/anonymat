@@ -50,7 +50,7 @@ jobs:
           AUTO: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.auto_patch) }}
         run: |
           set -euo pipefail
-          version() { python3 -c 'from version import __version__; print(__version__)'; }
+          version() { python3 -B -c 'from version import __version__; print(__version__)'; }
           v=$(version); tag="v$v"; ref=$(git rev-parse HEAD)
           if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "$tag" ]]; then
             echo "::error::L'étiquette $GITHUB_REF_NAME ne correspond pas à version.py ($v)"; exit 1
@@ -59,9 +59,13 @@ jobs:
           if gh release view "$tag" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             publish=false
             if [[ "$AUTO" == "true" ]]; then
-              # Changements de code depuis la dernière release (la doc seule ne compte pas)
+              # Changements du programme depuis la dernière release (doc, tests et CI ne comptent pas)
               git fetch --tags --force -q
-              mapfile -t changes < <(git log "$tag"..HEAD --format='%s' -- requirements.txt '*.py' '*.spec' haar models)
+              if ! git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+                echo "::error::Étiquette $tag introuvable alors que la release existe"; exit 1
+              fi
+              mapfile -t changes < <(git log "$tag"..HEAD --format='%s' -- \
+                requirements.txt '*.py' '*.spec' haar models ':!tests' ':!.github')
               if (( ${#changes[@]} )); then
                 git config user.name "github-actions[bot]"
                 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
