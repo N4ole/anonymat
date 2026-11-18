@@ -181,7 +181,9 @@ def test_visage_au_bord_entierement_couvert(mode, shape, pos):
     b = core.Box(pos[0], pos[1], min(80, 400 - pos[0]), min(80, 400 - pos[1]))
     out = core.anonymize(img, [b], mode, shape, margin=0.3)
     same = (out[b.y:b.y + b.h, b.x:b.x + b.w] == img[b.y:b.y + b.h, b.x:b.x + b.w]).all(axis=2)
-    assert same.mean() == 0
+    # Le bruit aléatoire peut, par hasard, redonner la couleur d'origine à un pixel isolé :
+    # on tolère 0,2 % (la fuite corrigée en 5.0.0 laissait 4 à 12 % du visage intact).
+    assert same.mean() < 0.002
 
 
 @pytest.mark.parametrize("pos", [(0, 0), (320, 320), (0, 150)])
