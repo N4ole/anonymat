@@ -1,6 +1,7 @@
 # Ménage hebdomadaire : ferme les PR Dependabot sur les actions GitHub, qu'un bot ne peut pas
 # fusionner (elles modifient des workflows) et qui resteraient ouvertes indéfiniment.
 # Les actions sont épinglées sur leur version majeure, qui reçoit les correctifs automatiquement.
+# (Dependabot supprime lui-même la branche d'une PR fermée.)
 name: Ménage
 
 on:
@@ -27,7 +28,7 @@ jobs:
           gh api "repos/$REPO/pulls?state=open&per_page=100" \
             --jq '.[] | select(.user.login == "dependabot[bot]" and (.head.ref | startswith("dependabot/github_actions/"))) | .number' |
           while read -r pr; do
-            gh pr close "$pr" -R "$REPO" --delete-branch --comment \
+            gh pr close "$pr" -R "$REPO" --comment \
               "Fermée automatiquement : les actions GitHub sont épinglées sur leur version majeure (correctifs automatiques) et mises à jour à la main lors d'un changement de version majeure, car un bot ne peut pas fusionner une PR qui modifie des workflows."
             echo "PR #$pr fermée"
           done
