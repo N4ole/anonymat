@@ -1,0 +1,40 @@
+name: 🐞 Bug
+description: Quelque chose ne marche pas comme prévu
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ⚠ **Ne joins JAMAIS de vraie photo de personne.** Utilise une image de synthèse ou décris la situation.
+        Si un visage reste reconnaissable ou si une information fuit, c'est une **faille** : signale-la en privé (onglet *Security*), pas ici.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Visible dans le titre de la fenêtre ou via le bouton ⓘ
+      placeholder: "6.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: detection
+    attributes:
+      label: Détection (bouton ⓘ)
+      options: ["IA (YuNet)", "basique (Haar)", "aucune", "je ne sais pas"]
+  - type: textarea
+    id: etapes
+    attributes:
+      label: Étapes pour reproduire
+      placeholder: "1. Ajouter une photo PNG transparente…"
+    validations:
+      required: true
+  - type: textarea
+    id: attendu
+    attributes:
+      label: Résultat attendu / obtenu
+    validations:
+      required: true
+  - type: input
+    id: systeme
+    attributes:
+      label: Windows (version, mise à l'échelle de l'écran)
+      placeholder: "Windows 11 23H2, 150 %"

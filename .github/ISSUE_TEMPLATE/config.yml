@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Signaler une faille de sécurité (en privé)
+    url: https://github.com/N4ole/anonymat/security/advisories/new
+    about: Visage reconnaissable malgré le 🔒, métadonnée qui fuit, modèle altéré non détecté…

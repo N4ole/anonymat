@@ -1,19 +1,23 @@
-# Anonymiseur de visages
+# Anonymat – anonymiseur de visages
 
-Logiciel Windows (un seul `.exe`) qui cache les visages sur des photos, avec un vrai anonymat par défaut.
+[![CI](https://github.com/N4ole/anonymat/actions/workflows/ci.yml/badge.svg)](https://github.com/N4ole/anonymat/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/N4ole/anonymat?label=t%C3%A9l%C3%A9charger)](https://github.com/N4ole/anonymat/releases/latest)
+[![CodeQL](https://github.com/N4ole/anonymat/actions/workflows/codeql.yml/badge.svg)](https://github.com/N4ole/anonymat/actions/workflows/codeql.yml)
+![Windows](https://img.shields.io/badge/Windows-un%20seul%20.exe-0a84ff)
+![Hors ligne](https://img.shields.io/badge/r%C3%A9seau-jamais-1b7a34)
 
-## Compiler le .exe
+Logiciel Windows (un seul `.exe`, rien à installer) qui cache les visages sur des photos, avec un **vrai anonymat par défaut** : le visage est détruit, pas seulement flouté, et toutes les informations cachées des photos (GPS, appareil…) sont supprimées. Il fonctionne **entièrement hors ligne**.
 
-**Option A – sur ton PC (Python 3.10+)** : double-clic sur `build.bat`. Le script :
-1. installe les dépendances (versions figées dans `requirements.txt`) ;
-2. télécharge le modèle d'IA **YuNet** et **vérifie son empreinte SHA-256** (un fichier corrompu ou modifié est refusé). Sans modèle, il demande confirmation avant de compiler une version « détection basique » ;
-3. lance les tests automatiques (`tests/`) ;
-4. compile avec `AnonymiseurVisages.spec` → `dist\AnonymiseurVisages.exe` ;
-5. lance l'auto-test du .exe.
+## Télécharger
 
-Si le téléchargement est bloqué : place `face_detection_yunet_2023mar.onnx` (OpenCV Zoo) dans `models\` à la main ; il sera vérifié de la même façon.
+👉 **[Dernière version](https://github.com/N4ole/anonymat/releases/latest)** : télécharge `AnonymiseurVisages-X.Y.Z-windows-x64.exe` et lance-le.
 
-**Option B – sans Python** : pousse le dossier sur GitHub → onglet *Actions* → *Build exe*. La CI échoue si le modèle IA est absent, si un test échoue, ou si le .exe ne démarre pas depuis un dossier au nom accentué.
+Pour vérifier que le fichier est authentique (voir aussi [SECURITY.md](SECURITY.md)) :
+```powershell
+Get-FileHash .\AnonymiseurVisages-X.Y.Z-windows-x64.exe -Algorithm SHA256   # = valeur de SHA256SUMS.txt
+gh attestation verify AnonymiseurVisages-X.Y.Z-windows-x64.exe -R N4ole/anonymat  # compilé par la CI de ce dépôt
+```
+Le `.exe` n'est pas signé avec un certificat : SmartScreen peut afficher « Windows a protégé votre ordinateur ». Clique alors sur *Informations complémentaires → Exécuter quand même*.
 
 ## Utilisation
 
@@ -75,12 +79,35 @@ Pourquoi pas un vrai ré-entraînement du réseau de neurones ? Il faudrait cons
 - ⚠ L'effacement des originaux écrase puis supprime le fichier, mais sur SSD, clé USB, cloud (OneDrive…) ou sauvegardes, des copies peuvent subsister ; Windows garde aussi des miniatures en cache.
 - ✖ Pas encore géré : vidéo, voix, détection automatique des plaques et tatouages (à masquer à la main).
 
+## Compiler soi-même
+
+Sur ton PC (Python 3.10+) : double-clic sur `build.bat`. Le script :
+1. installe les dépendances (versions figées) ;
+2. télécharge le modèle d'IA **YuNet** et **vérifie son empreinte SHA-256**. Un fichier modifié est refusé ; sans modèle, il demande confirmation ;
+3. lance les tests ;
+4. compile `dist\AnonymiseurVisages.exe` ;
+5. lance l'auto-test du `.exe`, et s'arrête s'il échoue.
+
+Si le téléchargement est bloqué, place `face_detection_yunet_2023mar.onnx` (OpenCV Zoo) dans `models\` à la main ; il sera vérifié de la même façon.
+
+### Automatisation GitHub
+
+| Workflow | Quand | Ce qu'il fait |
+|---|---|---|
+| **CI** | chaque push / pull request | lint (ruff), tests Linux, puis compilation et auto-test du `.exe` sous Windows (artefact téléchargeable 30 jours) |
+| **Release** | quand `version.py` change sur `main` (ou étiquette `vX.Y.Z`, ou à la main) | publie la release : `.exe`, `SHA256SUMS.txt`, attestation de provenance, notes tirées du [CHANGELOG](CHANGELOG.md) |
+| **CodeQL** | chaque push + chaque semaine | analyse de sécurité du code |
+| **Dependabot** | chaque semaine | propose les mises à jour des dépendances et des actions (testées par la CI) |
+
+Publier une version : voir [CONTRIBUTING.md](CONTRIBUTING.md#publier-une-version).
+
 ## Fichiers
 
 - `learning.py` – apprentissage local à partir des corrections
 - `core.py` – détection (scores de confiance 0–1), anonymisation, noms de sortie, sauvegarde sans métadonnées, effacement
 - `app.py` – interface Tkinter (+ `--selftest` pour la CI)
+- `version.py` – numéro de version unique (appli, .exe, release)
 - `tests/` – tests pytest (un par bug ou exigence relevés en revue)
 - `tools_model.py` – téléchargement + vérification du modèle YuNet
-- `AnonymiseurVisages.spec`, `build.bat`, `.github/workflows/build.yml` – compilation
+- `AnonymiseurVisages.spec`, `build.bat` – compilation ; `.github/` – CI, release, CodeQL, Dependabot, modèles d'issues
 - `haar/` – détecteur de secours (OpenCV 4.x)

@@ -1,0 +1,21 @@
+name: 💡 Idée / amélioration
+description: Proposer une fonctionnalité
+labels: [amélioration]
+body:
+  - type: textarea
+    id: besoin
+    attributes:
+      label: Le besoin
+      description: Quelle situation concrète ? (ex. « je floute 200 photos de match par semaine »)
+    validations:
+      required: true
+  - type: textarea
+    id: proposition
+    attributes:
+      label: Ce que tu proposes
+  - type: checkboxes
+    id: securite
+    attributes:
+      label: Sécurité
+      options:
+        - label: Ma proposition n'affaiblit pas l'anonymat par défaut (ou elle reste derrière les options avancées, avec un avertissement)
