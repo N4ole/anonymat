@@ -101,7 +101,9 @@ def test_transparence_conservee(tmp_path):
     Image.fromarray(rgba, "RGBA").save(tmp_path / "t.png")
     rgb, alpha = core.load_image_full(str(tmp_path / "t.png"))
     core.save_clean(core.anonymize(rgb, [core.Box(10, 10, 50, 50)]), str(tmp_path / "o.png"), alpha)
-    assert Image.open(tmp_path / "o.png").mode == "RGBA"
+    with Image.open(tmp_path / "o.png") as out:
+        mode = out.mode
+    assert mode == "RGBA"
 
 
 def test_image_tres_allongee():

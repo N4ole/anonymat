@@ -64,6 +64,7 @@ def save_config(cfg: dict) -> None:
         with open(config_path(), "w", encoding="utf-8") as f:
             json.dump(cfg, f)
     except Exception:
+        # Réglages non enregistrables (droits, disque plein…) : simple confort, on continue sans.
         pass
 
 
@@ -139,7 +140,8 @@ class App(tk.Tk):
         self.minsize(1040, 640)
         try:
             self.iconbitmap(core.resource_path("icon.ico"))
-        except Exception:
+        except tk.TclError:
+            # Icône absente ou non gérée par le système : la fenêtre garde l'icône par défaut.
             pass
 
         self.items: list[Item] = []
@@ -190,6 +192,7 @@ class App(tk.Tk):
         try:
             style.theme_use("vista" if sys.platform == "win32" else "clam")
         except tk.TclError:
+            # Thème indisponible sur ce système : le thème Tk par défaut convient.
             pass
         style.configure("Big.TButton", font=("Segoe UI", 11, "bold"), padding=8)
 
@@ -765,6 +768,7 @@ class App(tk.Tk):
         try:
             self.btn_doubt.state(["!disabled"] if it and self._doubtful(it) else ["disabled"])
         except (AttributeError, tk.TclError):
+            # Appel pendant la construction de l'interface (bouton pas encore créé) : rien à griser.
             pass
         if not it:
             self.review_lbl.configure(text="")
@@ -1099,7 +1103,7 @@ class App(tk.Tk):
                     except Exception as exc:
                         errors.append(f"{os.path.basename(it.path)} : {exc}")
                     self.results.put(("exp_prog", n, None))
-            except BaseException as exc:  # filet de sécurité : l'interface ne reste jamais bloquée
+            except Exception as exc:  # filet de sécurité (le finally garantit déjà que l'interface est débloquée)
                 errors.append(f"Erreur inattendue : {exc!r}")
             finally:
                 self.results.put(("exp_done", None, dict(written=written, total=len(jobs), errors=errors,
@@ -1236,6 +1240,7 @@ def main() -> None:
             import ctypes
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
+            # Windows trop ancien (pas de shcore) : l'affichage reste simplement moins net.
             pass
     App([a for a in sys.argv[1:] if not a.startswith("--")]).mainloop()
 

@@ -83,6 +83,7 @@ class Learner:
                 json.dump({"version": VERSION, "events": self.events[-MAX_EVENTS:]}, f)
             os.replace(tmp, self.path)
         except Exception:
+            # Échec d'écriture : l'apprentissage reste en mémoire pour cette session, rien de bloquant.
             pass
 
     def reset(self) -> None:
@@ -92,7 +93,10 @@ class Learner:
             try:
                 os.remove(self.path)
             except OSError:
-                pass
+                # Fichier verrouillé : on l'écrase par un apprentissage vide, sinon il reviendrait au prochain lancement.
+                ro, self.read_only = self.read_only, False
+                self.save()
+                self.read_only = ro
 
     # ------------------------------------------------------------- collecte --
     def record(self, kind: str, backend: str, score: float, w: int, h: int, img_w: int, img_h: int) -> None:

@@ -229,6 +229,7 @@ def image_size(path: str) -> tuple[int, int]:
             if im.getexif().get(0x0112) in (5, 6, 7, 8):
                 w, h = h, w
         except Exception:
+            # EXIF illisible ou corrompu : pas d'orientation connue, la taille brute est la bonne.
             pass
         return w, h
 

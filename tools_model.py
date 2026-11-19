@@ -16,7 +16,10 @@ os.makedirs(os.path.dirname(dst), exist_ok=True)
 
 
 def ok(path):
-    return os.path.isfile(path) and hashlib.sha256(open(path, "rb").read()).hexdigest() == YUNET_SHA256
+    if not os.path.isfile(path):
+        return False
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest() == YUNET_SHA256
 
 
 if ok(dst):
