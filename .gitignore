@@ -4,3 +4,6 @@ dist/
 __pycache__/
 *.part
 models/*.onnx
+ffmpeg/*.exe
+ffmpeg/*.sha256
+ffmpeg/LICENSE-ffmpeg.txt

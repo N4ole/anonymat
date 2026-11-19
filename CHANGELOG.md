@@ -10,11 +10,14 @@ Chaque section `## [X.Y.Z]` sert de notes à la release correspondante.
 - **Passages à risque** : « Suivante ▶ » emmène à chaque moment où un visage a pu échapper à la détection (visage perdu puis retrouvé, détection peu sûre, apparition ou disparition au milieu de l'image) avant de valider la vidéo.
 - Zones manuelles sur une plage de temps : « 📍 Replacer ici » (déplacement interpolé), « ⏮ Début ici », « Fin ici ⏭ ».
 - Réglage *Analyse des vidéos* : auto, précise (10 analyses par seconde) ou rapide (4 par seconde).
+- **Son des vidéos** : supprimé (par défaut) ou **voix déformée** (voix chuchotée, timbre changé au hasard), avec un bouton pour écouter un extrait.
 
 ### Sécurité
 - Suivi avec hystérésis (un visage repéré reste suivi même quand il devient difficile à voir), prolongé vers l'arrière ; entre deux analyses, la zone couvre les deux positions ; trous de moins d'une seconde comblés ; chaque visage est caché un peu avant et après ses détections.
 - Seuil d'anonymat plus strict pour les vidéos (≤ 8 blocs) : les nombreuses images d'un même visage aident à le reconstruire. Le mode simple le respecte.
-- Vidéos réécrites image par image : **son supprimé** et aucune métadonnée recopiée. Écriture atomique.
+- Vidéos réécrites image par image : aucune métadonnée recopiée, écriture atomique. Son supprimé par défaut, et toujours en mode terrain.
+- Voix déformée non réversible : la hauteur de la voix est détruite (et non décalée) et le décalage du timbre est aléatoire et variable. Le bandeau reste orange, car l'accent et les mots prononcés restent.
+- `ffmpeg.exe` : build minimale compilée par la CI depuis les sources officielles (son seulement, LGPL-2.1, garde-fou contre toute configuration GPL), empreinte vérifiée au lancement.
 - Supprimer un visage d'une vidéo le retire sur toute sa durée, et il ne revient pas si la détection est relancée.
 
 ## [6.0.1] - 2026-11-18

@@ -10,7 +10,7 @@ Principes de sécurité (en plus de ceux de core.py) :
     après (au moins un intervalle d'analyse).
   * Seuil plus strict qu'en photo (core.VIDEO_SAFE_BLOCKS).
   * Le fichier est réécrit image par image : aucune métadonnée (GPS, appareil, date)
-    n'est recopiée, et le son est supprimé.
+    n'est recopiée. Le son est supprimé, ou remplacé par la voix déformée (audio.py).
   * Ce qui reste incertain est signalé comme « passage à risque » pour la revue.
 """
 
@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+import audio
 import core
 
 LOW_SCORE = 0.30            # score mini pour PROLONGER une piste déjà accrochée
@@ -356,14 +357,25 @@ def find_risks(tracks: list[Track], info: VideoInfo, step: int) -> list[Risk]:
 def export(src: str, dst: str, tracks: list[Track], mode: str = "flou", shape: str = "rectangle",
            margin: float = 0.3, strength: float = core.SIMPLE_STRENGTH,
            progress: Callable[[float], None] | None = None,
-           cancel: Callable[[], bool] | None = None) -> int:
-    """Réécrit la vidéo image par image (sans son ni métadonnées), de façon atomique.
+           cancel: Callable[[], bool] | None = None,
+           sound: str = "supprimer", ffmpeg: audio.Ffmpeg | None = None) -> int:
+    """Réécrit la vidéo image par image (sans métadonnées), de façon atomique.
+    `sound` : « supprimer » (défaut, le plus sûr) ou « voix » (voix déformée, via ffmpeg).
     Renvoie le nombre d'images écrites."""
+    pcm = None
+    if sound == "voix":
+        if ffmpeg is None or not ffmpeg.ok:
+            raise OSError("voix déformée impossible : " + (ffmpeg.problem if ffmpeg else "ffmpeg indisponible"))
+        orig = ffmpeg.extract(src)
+        if orig is not None:  # vidéo sans son : rien à déformer
+            pcm = audio.disguise_long(orig)
+        del orig
     cap = open_capture(src)
     total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
     fps = _fps(cap)
     root, ext = os.path.splitext(dst)
     tmp = root + ".part" + ext          # l'extension finale choisit le conteneur MP4
+    tmp2 = root + ".part2" + ext        # vidéo + son déformé
     writer = None
     n = 0
     try:
@@ -398,11 +410,18 @@ def export(src: str, dst: str, tracks: list[Track], mode: str = "flou", shape: s
         check.release()
         if not good:
             raise OSError("la vidéo écrite est illisible")
-        os.replace(tmp, dst)
+        if pcm is not None:
+            if cancel and cancel():
+                raise Cancelled
+            ffmpeg.mux(tmp, pcm, tmp2)
+            os.replace(tmp2, dst)
+        else:
+            os.replace(tmp, dst)
         return n
     finally:
         if writer is not None:
             writer.release()
         cap.release()
-        if os.path.exists(tmp):
-            os.remove(tmp)
+        for p in (tmp, tmp2):
+            if os.path.exists(p):
+                os.remove(p)

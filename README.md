@@ -56,7 +56,10 @@ Une vidéo s'ajoute comme une photo. Elle est d'abord **analysée** (barre de pr
 - **✕ sur un cadre** : le visage est retiré sur **toute** la vidéo (et ne revient pas si la détection est relancée).
 - **➕ Visage oublié** : la zone dessinée commence à l'image affichée et dure **jusqu'à la fin** de la vidéo. Sélectionne-la, puis :
   `📍 Replacer ici` sur d'autres images (entre deux positions, elle se déplace toute seule), `⏮ Début ici`, `Fin ici ⏭`.
-- La vidéo est réécrite image par image en **MP4, sans le son** (une voix identifie aussi bien qu'un visage) et sans aucune métadonnée.
+- La vidéo est réécrite image par image en **MP4**, sans aucune métadonnée.
+- **Son de la vidéo** (sous le lecteur) :
+  - 🔇 **Son supprimé** (par défaut, et toujours en mode terrain) : anonymat total, une voix identifie aussi bien qu'un visage ;
+  - 🗣 **Voix déformée** : les paroles restent compréhensibles, mais la voix devient chuchotée, avec un timbre changé au hasard (plus grave ou plus aigu, et qui varie). La hauteur et la mélodie de la voix sont **détruites**, pas seulement transformées : on ne peut pas revenir à l'original. `🔊 Écouter la voix déformée` joue 8 secondes à partir de l'image affichée. Le bandeau reste **orange** : l'accent, le rythme et les mots prononcés (noms, lieux) restent, comme les bruits de fond.
 
 Comment aucun visage n'échappe au suivi :
 - le détecteur analyse 10 images par seconde de film (4 pour les vidéos de plus de 3 minutes ; réglable dans ⚙ *Analyse des vidéos*) ;
@@ -65,7 +68,6 @@ Comment aucun visage n'échappe au suivi :
 - l'effet doit être plus fort que sur une photo (≤ 8 blocs) : sur une vidéo, les nombreuses images d'un même visage aident à le reconstruire. Le mode simple le respecte toujours.
 
 Limites actuelles :
-- **son supprimé**, sans option pour le garder (une voix déformée est prévue) ;
 - format **MPEG-4 Part 2** : lisible avec VLC et le lecteur de Windows, mais pas toujours par les téléphones ou les sites web (le H.264 est prévu) ;
 - les vidéos à cadence variable (téléphones) sont réécrites à cadence fixe : la durée peut varier très légèrement.
 
@@ -91,7 +93,7 @@ Pourquoi pas un vrai ré-entraînement du réseau de neurones ? Il faudrait cons
 
 - ✅ Le visage est détruit (réduction à quelques blocs + bruit aléatoire non reproductible), pas seulement flouté.
 - ✅ Aucune métadonnée recopiée (EXIF, GPS, appareil, XMP, miniature EXIF ; pour les vidéos, rien du fichier d'origine à part les images), écriture atomique.
-- ✅ Vidéos : visages suivis d'une image à l'autre, passages à risque signalés, son supprimé.
+- ✅ Vidéos : visages suivis d'une image à l'autre, passages à risque signalés, son supprimé (ou voix déformée de façon non réversible, au choix).
 - ✅ Noms neutres par défaut (le nom d'origine contient souvent date et heure).
 - ✅ L'ellipse, le rond flou et l'émoji sont agrandis pour recouvrir tout le cadre du visage, **y compris collé au bord de la photo** ; les zones manuelles ont une marge minimale.
 - ✅ PNG/WebP transparents : les couleurs cachées sous les pixels transparents sont effacées.
@@ -101,7 +103,9 @@ Pourquoi pas un vrai ré-entraînement du réseau de neurones ? Il faudrait cons
 - ⚠ La détection automatique peut rater un visage (de dos, masqué, minuscule) : la revue photo par photo reste indispensable. Sans le modèle IA (détection basique), un bandeau rouge le signale.
 - ⚠ L'effacement des originaux écrase puis supprime le fichier, mais sur SSD, clé USB, cloud (OneDrive…) ou sauvegardes, des copies peuvent subsister ; Windows garde aussi des miniatures en cache.
 - ⚠ Vidéos : l'analyse ne regarde pas chaque image ; le suivi comble les trous, mais un visage qui n'est jamais détecté (de dos, minuscule) doit être ajouté à la main.
-- ✖ Pas encore géré : déformation de la voix (le son est supprimé), détection automatique des plaques et tatouages (à masquer à la main).
+- ⚠ Voix déformée : moins reconnaissable, pas méconnaissable (accent, rythme, mots prononcés). Seul « Son supprimé » est un anonymat total.
+- ✅ Si le composant son (ffmpeg) a été modifié (empreinte incorrecte), il est refusé et une alerte l'indique.
+- ✖ Pas encore géré : détection automatique des plaques et tatouages (à masquer à la main).
 
 ## Compiler soi-même
 
@@ -113,6 +117,8 @@ Sur ton PC (Python 3.10+) : double-clic sur `build.bat`. Le script :
 5. lance l'auto-test du `.exe`, et s'arrête s'il échoue.
 
 Si le téléchargement est bloqué, place `face_detection_yunet_2023mar.onnx` (OpenCV Zoo) dans `models\` à la main ; il sera vérifié de la même façon.
+
+**Voix déformée** : `ffmpeg.exe` est une build minimale compilée sous Linux par la CI ([`build_ffmpeg.sh`](.github/scripts/build_ffmpeg.sh)). Pour l'inclure dans une compilation locale, télécharge l'artefact `ffmpeg-windows` d'une exécution de la CI (onglet *Actions*) et décompresse-le dans `ffmpeg\`. Sans lui, le programme fonctionne, mais le son des vidéos est toujours supprimé.
 
 ### Automatisation GitHub
 
@@ -135,6 +141,7 @@ Publier une version : voir [CONTRIBUTING.md](CONTRIBUTING.md#publier-une-version
 - `learning.py` – apprentissage local à partir des corrections
 - `core.py` – détection (scores de confiance 0–1), anonymisation, noms de sortie, sauvegarde sans métadonnées, effacement
 - `video.py` – vidéos : analyse, suivi des visages, passages à risque, export MP4
+- `audio.py` – son des vidéos : déformation de la voix, appel de `ffmpeg.exe` (empreinte vérifiée)
 - `app.py` – interface Tkinter (+ `--selftest` pour la CI)
 - `version.py` – numéro de version unique (appli, .exe, release)
 - `tests/` – tests pytest (un par bug ou exigence relevés en revue)

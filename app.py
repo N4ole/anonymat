@@ -19,6 +19,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -26,6 +27,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
+import audio
 import core
 import learning
 import video
@@ -204,6 +206,8 @@ class App(tk.Tk):
         self.learner = learning.Learner(os.path.join(os.path.dirname(config_path()), "apprentissage.json"))
 
         self.detector = core.FaceDetector()
+        self.ffmpeg = audio.Ffmpeg()   # son des vidéos (voix déformée) ; empreinte vérifiée
+        self._listen_file: str | None = None
         self.jobs: queue.Queue = queue.Queue()
         self.results: queue.Queue = queue.Queue()
         threading.Thread(target=self._worker, daemon=True).start()
@@ -215,6 +219,7 @@ class App(tk.Tk):
 
         self._build_ui()
         self._update_learn_label()
+        self._update_sound_ui()
         self._on_mode()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(100, self._poll)
@@ -229,6 +234,12 @@ class App(tk.Tk):
                 APP_NAME, "Aucun détecteur de visages n'a pu être chargé :\n\n"
                 + "\n".join(self.detector.problems)
                 + "\n\nAucun visage ne sera trouvé automatiquement : tu devras ajouter chaque zone à la main."))
+        if self.ffmpeg.tampered:
+            self.after(400, lambda: messagebox.showerror(
+                APP_NAME, "⛔ Le composant son (ffmpeg) de ce programme a été MODIFIÉ ou est corrompu "
+                          "(empreinte de sécurité incorrecte).\n\nLe programme a peut-être été altéré : "
+                          "retélécharge-le depuis une source sûre.\n\nEn attendant, le son des vidéos "
+                          "sera toujours supprimé."))
         if initial:
             self.after(200, lambda: self.add_paths(initial))
 
@@ -448,6 +459,25 @@ class App(tk.Tk):
                                         "(par défaut, elle dure jusqu'à la fin de la vidéo).")):
             Tooltip(bb, tip)
 
+        snd = ttk.Frame(self.vbar)
+        snd.pack(fill="x", pady=(4, 0))
+        ttk.Label(snd, text="Son de la vidéo :").pack(side="left")
+        self.sound = tk.StringVar(value=audio.SOUND_MODES["supprimer"])
+        self.sound_cb = ttk.Combobox(snd, textvariable=self.sound, state="readonly", width=18,
+                                     values=list(audio.SOUND_MODES.values()))
+        self.sound_cb.pack(side="left", padx=4)
+        self.sound_cb.bind("<<ComboboxSelected>>", lambda e: self._on_sound())
+        Tooltip(self.sound_cb, "🔇 Son supprimé : anonymat total (une voix identifie aussi bien qu'un visage).\n"
+                               "🗣 Voix déformée : les paroles restent compréhensibles (voix chuchotée, timbre "
+                               "changé au hasard, impossible à annuler), mais l'accent, le rythme et les mots "
+                               "prononcés (noms, lieux) restent. Vaut pour toutes les vidéos.")
+        self.btn_listen = ttk.Button(snd, text="🔊 Écouter la voix déformée", command=self.listen_voice)
+        self.btn_listen.pack(side="left", padx=4)
+        Tooltip(self.btn_listen, "Joue 8 secondes de voix déformée, à partir de l'image affichée, "
+                                 "pour vérifier qu'on ne reconnaît plus la personne.")
+        self.sound_note = ttk.Label(snd, text="", foreground="#555")
+        self.sound_note.pack(side="left", padx=6)
+
         tools = self.tools = ttk.Frame(right, padding=(0, 4))
         tools.pack(fill="x")
         self.btn_add_face = ttk.Button(tools, text="➕ Visage oublié",
@@ -535,10 +565,39 @@ class App(tk.Tk):
             self.adv.pack(fill="x", after=self.top)
         else:
             self.adv.pack_forget()
+        self._update_sound_ui()  # le mode terrain dépend des options avancées
         self._save_cfg()
         self._on_mode()
 
+    def _sound(self) -> str:
+        """« voix » seulement si choisie, permise (pas en mode terrain) et possible (ffmpeg intègre)."""
+        if self._terrain() or not self.ffmpeg.ok:
+            return "supprimer"
+        return "voix" if self.sound.get() == audio.SOUND_MODES["voix"] else "supprimer"
+
+    def _on_sound(self) -> None:
+        if self.sound.get() == audio.SOUND_MODES["voix"] and self._sound() != "voix":
+            messagebox.showinfo(APP_NAME, "Mode terrain : le son des vidéos est toujours supprimé."
+                                if self._terrain() else self.ffmpeg.problem)
+            self.sound.set(audio.SOUND_MODES["supprimer"])
+        self._update_sound_ui()
+        self._on_strength(redraw=False)
+        self._update_review()
+
+    def _update_sound_ui(self) -> None:
+        if self._sound() != "voix" and self.sound.get() == audio.SOUND_MODES["voix"]:
+            self.sound.set(audio.SOUND_MODES["supprimer"])
+        voice = self._sound() == "voix"
+        self.btn_listen.state(["!disabled"] if voice and sys.platform == "win32" else ["disabled"])
+        note = ""
+        if self._terrain():
+            note = "(mode terrain : son toujours supprimé)"
+        elif not self.ffmpeg.ok:
+            note = "(voix déformée indisponible dans cette version)"
+        self.sound_note.configure(text=note)
+
     def _on_safe_only(self) -> None:
+        self._update_sound_ui()
         self._save_cfg()
         self._update_learn_label()
         self._on_mode()
@@ -622,7 +681,8 @@ class App(tk.Tk):
             if self.margin.get() < core.MIN_SAFE_MARGIN:
                 self.margin.set(core.MIN_SAFE_MARGIN)
         self.strength_val.configure(text=f"{round(self.strength.get() * 100)} %")
-        level, msg = core.safety(self._mode_key(), self._strength(), self._margin(), self._has_video())
+        level, msg = core.safety(self._mode_key(), self._strength(), self._margin(), self._has_video(),
+                                 self._sound() == "voix")
         bg, fg = SAFETY_COLORS[level]
         self.safety_lbl.configure(text=f"{SAFETY_ICONS[level]}  {msg}", bg=bg, fg=fg)
         if redraw and self.preview.get():
@@ -841,6 +901,9 @@ class App(tk.Tk):
                     continue
                 if it not in self.items:
                     continue
+                if kind == "listen":
+                    self._play_listen(data)
+                    continue
                 if kind == "probe":
                     box, score, (W, H) = data
                     self._learn("rate", score, box.w, box.h, W, H)
@@ -1014,7 +1077,8 @@ class App(tk.Tk):
             txt += f" — {k} passage{'s' if k > 1 else ''} à risque à vérifier : « Suivante ▶ » t'y emmène"
         else:
             txt += " — lis la vidéo et vérifie qu'aucun visage n'est oublié"
-        return txt + "  · 🔇 son supprimé" + ("  ✔" if it.reviewed else "")
+        son = "🗣 voix déformée" if self._sound() == "voix" else "🔇 son supprimé"
+        return txt + f"  · {son}" + ("  ✔" if it.reviewed else "")
 
     # ========================================================== aperçu ==
     def select_index(self, idx: int) -> None:
@@ -1314,7 +1378,8 @@ class App(tk.Tk):
                                            "ou désactive le mode terrain en connaissance de cause.")
             return
         mode, shape, margin, strength = self._mode_key(), self._shape(), self._margin(), self._strength()
-        level, msg = core.safety(mode, strength, margin, self._has_video())
+        sound = self._sound()
+        level, msg = core.safety(mode, strength, margin, self._has_video(), sound == "voix")
         if level != "ok" and not messagebox.askyesno(
                 APP_NAME, "⚠ Ce réglage ne garantit PAS l'anonymat :\n\n" + msg +
                           "\n\nPour un anonymat total : un style 🔒 avec une force suffisante.\n\n"
@@ -1335,10 +1400,12 @@ class App(tk.Tk):
                 APP_NAME, f"{len(no_face)} photo(s) ou vidéo(s) sans aucune zone : elles seront copiées sans "
                           "modification (mais nettoyées de leurs informations cachées).\n\nContinuer ?"):
             return
+        son = ("avec la VOIX DÉFORMÉE" if sound == "voix"
+               else "SANS LE SON (une voix identifie aussi bien qu'un visage)")
         if any(i.is_video for i in todo) and not self.cfg.get("video_info_vu") and not messagebox.askyesno(
-                APP_NAME, "Vidéos : elles seront enregistrées en MP4, SANS LE SON (une voix identifie "
-                          "aussi bien qu'un visage).\n\nFormat lisible avec VLC et le lecteur de Windows, "
-                          "mais pas toujours par les téléphones ou les sites web.\n\nContinuer ?"):
+                APP_NAME, f"Vidéos : elles seront enregistrées en MP4, {son}.\n\nFormat lisible avec VLC et "
+                          "le lecteur de Windows, mais pas toujours par les téléphones ou les sites web."
+                          "\n\nContinuer ?"):
             return
         delete = self.advanced.get() and self.delete_orig.get()
         if delete and not messagebox.askyesno(
@@ -1384,7 +1451,7 @@ class App(tk.Tk):
                         if it.is_video:
                             video.export(it.path, dst, boxes, mode, shape, margin, strength,
                                          progress=lambda fr, n=n: self.results.put(("exp_prog", n - 1 + fr, None)),
-                                         cancel=lambda: self.cancel)
+                                         cancel=lambda: self.cancel, sound=sound, ffmpeg=self.ffmpeg)
                         else:
                             rgb, alpha = core.load_image_full(it.path)
                             out = core.anonymize(rgb, boxes, mode, shape, margin, strength=strength)
@@ -1557,6 +1624,58 @@ class App(tk.Tk):
         self._seek(r.frame)
         return True
 
+    def listen_voice(self) -> None:
+        """Extrait de 8 s de voix déformée (fil à part : ffmpeg + calcul), joué par Windows."""
+        it = self.current
+        if not it or not it.is_video or not it.vinfo or self._sound() != "voix" or sys.platform != "win32":
+            return
+        self.btn_listen.state(["disabled"])
+        self.status.configure(text="Préparation de l'extrait de voix déformée…")
+        start = it.pos / it.vinfo.fps
+
+        def run() -> None:
+            try:
+                pcm = self.ffmpeg.extract(it.path, start=start, duration=8.0)
+                if pcm is None or not len(pcm):
+                    self.results.put(("listen", it, None))
+                    return
+                fd, p = tempfile.mkstemp(prefix="voix_deformee_", suffix=".wav")
+                with os.fdopen(fd, "wb") as f:  # seulement la voix DÉFORMÉE, supprimée ensuite
+                    f.write(audio.wav_bytes(audio.disguise(pcm)))
+                self.results.put(("listen", it, p))
+            except Exception as exc:
+                self.results.put(("listen", it, exc))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _play_listen(self, data) -> None:
+        self._update_sound_ui()
+        if data is None:
+            self.status.configure(text="Pas de son à cet endroit de la vidéo.")
+            return
+        if isinstance(data, Exception):
+            self.status.configure(text=f"Extrait impossible : {data}")
+            return
+        import winsound
+        self._cleanup_listen()
+        self._listen_file = data
+        winsound.PlaySound(data, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        self.status.configure(text="🔊 8 s de voix déformée, à partir de l'image affichée.")
+
+    def _cleanup_listen(self) -> None:
+        if not self._listen_file:
+            return
+        try:
+            import winsound
+            winsound.PlaySound(None, 0)  # arrête la lecture en cours
+        except Exception:
+            pass  # pas de son en cours, ou système sans winsound : rien à arrêter
+        try:
+            os.remove(self._listen_file)
+        except OSError:
+            pass  # fichier encore verrouillé : il est dans le dossier temporaire de Windows
+        self._listen_file = None
+
     def zone_limit(self, end: bool) -> None:
         it, t = self.current, self.sel_box
         if not it or not it.is_video or not isinstance(t, video.Track) or t not in it.mtracks:
@@ -1621,7 +1740,7 @@ class App(tk.Tk):
             f"{APP_NAME} – version {__version__}\n\n"
             f"Détection : {engine}\n"
             f"Photos iPhone (HEIC) : {'oui' if core.HEIF_OK else 'non'}\n"
-            "Vidéos : MP4, son supprimé\n\n"
+            f"Vidéos : MP4 ; voix déformée : {'oui (ffmpeg vérifié)' if self.ffmpeg.ok else 'non'}\n\n"
             "Confidentialité : le programme ne se connecte JAMAIS à Internet. Les photos ne quittent "
             "pas ton ordinateur ; seuls quelques réglages et des statistiques numériques "
             "d'apprentissage sont gardés dans %APPDATA%\\AnonymiseurVisages.\n\n"
@@ -1635,6 +1754,7 @@ class App(tk.Tk):
 
     def on_close(self) -> None:
         self._stop_play()
+        self._cleanup_listen()
         if self.busy:
             if not messagebox.askyesno(APP_NAME, "Un enregistrement est en cours.\n"
                                                  "Arrêter après la photo en cours et quitter ?"):
@@ -1686,6 +1806,20 @@ def selftest(argv: list[str]) -> int:
         n = video.export(vsrc, vdst, video.build_tracks(cands, 0.6, step, info) + [t])
         lines.append(f"video={vdst} images={n}/{info.frames}")
         ok &= n == 12 and info.frames == 12 and os.path.exists(vdst)
+        # Son : ffmpeg.exe embarqué (empreinte vérifiée) + voix déformée
+        ff = audio.Ffmpeg()
+        lines.append("ffmpeg=" + ("ok" if ff.ok else ff.problem))
+        if ff.tampered or ("--require-ffmpeg" in argv and not ff.ok):
+            ok = False
+        if ff.ok:
+            asrc = os.path.join(d, "son été.mp4")
+            tone = (0.3 * np.sin(np.arange(audio.SR) * 2 * np.pi * 220 / audio.SR)).astype(np.float32)
+            ff.mux(vsrc, tone, asrc)
+            adst = core.plan_outputs([asrc])[asrc]
+            video.export(asrc, adst, [], sound="voix", ffmpeg=ff)
+            got = ff.extract(adst)
+            lines.append(f"voix={adst} son={'oui' if got is not None and len(got) else 'non'}")
+            ok &= got is not None and len(got) > 0
         shutil.rmtree(d, ignore_errors=True)
     except Exception as exc:
         lines.append(f"erreur={exc!r}")

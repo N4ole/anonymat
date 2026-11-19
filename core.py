@@ -94,9 +94,11 @@ def min_safe_strength(video: bool = False) -> float:
     return 1.0
 
 
-def safety(mode: str, strength: float, margin: float = 0.3, video: bool = False) -> tuple[str, str]:
+def safety(mode: str, strength: float, margin: float = 0.3, video: bool = False,
+           voice: bool = False) -> tuple[str, str]:
     """Renvoie (niveau, message clair) ; niveau ∈ ok | moyen | danger.
-    `video` : au moins une vidéo à traiter (seuil plus strict, voir VIDEO_SAFE_BLOCKS)."""
+    `video` : au moins une vidéo à traiter (seuil plus strict, voir VIDEO_SAFE_BLOCKS).
+    `voice` : le son des vidéos est gardé, voix déformée (jamais « anonymat total »)."""
     b = blocks_for(strength)
     if mode in ("noir", "emoji"):
         level, msg = "ok", "Anonymat total : le visage est entièrement recouvert."
@@ -124,6 +126,10 @@ def safety(mode: str, strength: float, margin: float = 0.3, video: bool = False)
         return "danger", "Méthode inconnue."
     if margin < MIN_SAFE_MARGIN and level == "ok" and mode != "bandeau":
         level, msg = "moyen", "Marge trop faible : cheveux, oreilles ou menton peuvent dépasser. Augmente la marge."
+    if video and voice and level == "ok":
+        level, msg = "moyen", ("Visages : anonymat total. Voix déformée : plus reconnaissable à son timbre, mais "
+                               "l'accent, le rythme et les mots prononcés (noms, lieux) restent. Pour un anonymat "
+                               "total, choisis « Son supprimé ».")
     return level, msg
 
 
