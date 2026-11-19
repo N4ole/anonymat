@@ -5,5 +5,5 @@ correspondante dans CHANGELOG.md, puis pousser sur main -> la release est créé
 automatiquement (voir .github/workflows/release.yml).
 """
 
-__version__ = "6.0.1"
+__version__ = "6.1.0"
 REPO_URL = "https://github.com/N4ole/anonymat"

@@ -3,6 +3,20 @@
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), versions selon [SemVer](https://semver.org/lang/fr/).
 Chaque section `## [X.Y.Z]` sert de notes à la release correspondante.
 
+## [6.1.0] - 2026-11-19
+
+### Ajouté
+- **Vidéos** (MP4, MOV, M4V, AVI, MKV, WebM, 3GP, WMV, MTS) : analyse, suivi des visages d'une image à l'autre, lecteur avec frise, export en MP4.
+- **Passages à risque** : « Suivante ▶ » emmène à chaque moment où un visage a pu échapper à la détection (visage perdu puis retrouvé, détection peu sûre, apparition ou disparition au milieu de l'image) avant de valider la vidéo.
+- Zones manuelles sur une plage de temps : « 📍 Replacer ici » (déplacement interpolé), « ⏮ Début ici », « Fin ici ⏭ ».
+- Réglage *Analyse des vidéos* : auto, précise (10 analyses par seconde) ou rapide (4 par seconde).
+
+### Sécurité
+- Suivi avec hystérésis (un visage repéré reste suivi même quand il devient difficile à voir), prolongé vers l'arrière ; entre deux analyses, la zone couvre les deux positions ; trous de moins d'une seconde comblés ; chaque visage est caché un peu avant et après ses détections.
+- Seuil d'anonymat plus strict pour les vidéos (≤ 8 blocs) : les nombreuses images d'un même visage aident à le reconstruire. Le mode simple le respecte.
+- Vidéos réécrites image par image : **son supprimé** et aucune métadonnée recopiée. Écriture atomique.
+- Supprimer un visage d'une vidéo le retire sur toute sa durée, et il ne revient pas si la détection est relancée.
+
 ## [6.0.1] - 2026-11-18
 
 ### Ajouté

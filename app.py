@@ -5,7 +5,10 @@
     noms de fichiers, suppression des originaux.
   * Revue image par image : « Suivante ▶ » marque l'image comme vérifiée.
 
-Lancement en ligne de commande : AnonymiseurVisages.exe [images ou dossiers…]
+  * Vidéos : analyse + suivi des visages, frise avec « passages à risque », zones
+    manuelles sur une plage de temps, export MP4 sans son ni métadonnées.
+
+Lancement en ligne de commande : AnonymiseurVisages.exe [photos, vidéos ou dossiers…]
 Auto-test (CI) : AnonymiseurVisages.exe --selftest [--require-ai] [--log fichier]
 """
 
@@ -17,6 +20,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -24,11 +28,14 @@ from PIL import Image, ImageTk
 
 import core
 import learning
+import video
 from version import REPO_URL, __version__
 
 APP_NAME = "Anonymiseur de visages"
 PROXY_SIDE = 1600       # taille max de l'image d'aperçu (fluidité sur les photos 48 Mpx)
 DETECT_SIDE = 2560      # taille max utilisée pour la détection
+VIDEO_SIDE = 1280       # taille max de l'aperçu vidéo (lecture fluide)
+SPEEDS = {"Auto": "auto", "Précise": "precise", "Rapide": "rapide"}
 
 COL = {"auto": "#ff3b30", "manuel": "#0a84ff", "objet": "#ff9500", "sel": "#ffd60a"}
 
@@ -111,23 +118,55 @@ class Item:
         self.out_path: str | None = None     # dernière sortie (ré-export = remplacement)
         self.size: tuple[int, int] = (0, 0)  # taille réelle de la photo
         self.learned = False                 # zones déjà apprises comme « ok »
+        # --- vidéo ---
+        self.is_video = core.is_video(path)
+        self.vinfo: video.VideoInfo | None = None
+        self.vstep = 1
+        self.cands: dict[int, list[core.Box]] = {}  # candidats par image analysée (sensibilité sans relecture)
+        self.tracks: list[video.Track] = []         # visages suivis automatiquement
+        self.mtracks: list[video.Track] = []        # zones ajoutées à la main
+        self.vrejected: list[tuple[int, core.Box]] = []  # pistes supprimées : ne reviennent pas
+        self.risks: list[video.Risk] = []
+        self.seen: set[int] = set()                 # passages à risque déjà montrés (n° d'image)
+        self.pos = 0                                # image affichée
+        self.progress = 0.0
+        self.gen = 0                                # change = analyse en cours abandonnée
+        self.cancelled = False
+
+    @property
+    def all_tracks(self) -> list[video.Track]:
+        return self.tracks + self.mtracks
+
+    @property
+    def n_zones(self) -> int:
+        return len(self.all_tracks) if self.is_video else len(self.boxes)
 
     @property
     def n_faces(self) -> int:
+        if self.is_video:
+            return sum(t.kind == "visage" for t in self.all_tracks)
         return sum(b.kind == "visage" for b in self.boxes)
 
     @property
+    def unseen_risks(self) -> list[video.Risk]:
+        return [r for r in self.risks if r.frame not in self.seen]
+
+    @property
     def label(self) -> str:
-        name = os.path.basename(self.path)
+        name = ("🎬 " if self.is_video else "") + os.path.basename(self.path)
         if self.state == "attente":
             return f"⏳  {name}"
         if self.state == "analyse":
-            return f"🔍  {name}"
+            pct = f"  ({round(self.progress * 100)} %)" if self.is_video else ""
+            return f"🔍  {name}{pct}"
         if self.state == "erreur":
             return f"⚠  {name}  (illisible)"
-        n = len(self.boxes)
+        n = self.n_zones
         mark = "💾" if self.state == "fait" else ("✔" if self.reviewed else "•")
-        return f"{mark}  {name}  —  {n} zone{'s' if n > 1 else ''}"
+        txt = f"{mark}  {name}  —  {n} zone{'s' if n > 1 else ''}"
+        if self.is_video and not self.reviewed and self.unseen_risks:
+            txt += f" · ⚠ {len(self.unseen_risks)}"
+        return txt
 
 
 # --------------------------------------------------------------------------- #
@@ -157,6 +196,10 @@ class App(tk.Tk):
         self.cancel = False
         self.export_thread: threading.Thread | None = None
         self._sens_job = None
+        self._seek_job = None
+        self.reader: video.Reader | None = None  # vidéo affichée
+        self.playing = False
+        self.cur_risk: video.Risk | None = None
         self.cfg = load_config()
         self.learner = learning.Learner(os.path.join(os.path.dirname(config_path()), "apprentissage.json"))
 
@@ -164,6 +207,11 @@ class App(tk.Tk):
         self.jobs: queue.Queue = queue.Queue()
         self.results: queue.Queue = queue.Queue()
         threading.Thread(target=self._worker, daemon=True).start()
+        # Vidéos : file et détecteur à part (une longue vidéo ne bloque pas les photos ;
+        # un détecteur n'est jamais utilisé par deux fils à la fois).
+        self.vdetector = core.FaceDetector()
+        self.vjobs: queue.Queue = queue.Queue()
+        threading.Thread(target=self._vworker, daemon=True).start()
 
         self._build_ui()
         self._update_learn_label()
@@ -196,15 +244,15 @@ class App(tk.Tk):
         # --- Barre du haut ---------------------------------------------------
         top = self.top = ttk.Frame(self, padding=(8, 8, 8, 4))
         top.pack(fill="x")
-        self.btn_add = ttk.Button(top, text="➕ Photos…", command=self.pick_files)
+        self.btn_add = ttk.Button(top, text="➕ Photos / vidéos…", command=self.pick_files)
         self.btn_add.pack(side="left")
         self.btn_dir = ttk.Button(top, text="📁 Dossier…", command=self.pick_folder)
         self.btn_dir.pack(side="left", padx=4)
         self.btn_clear = ttk.Button(top, text="🗑 Vider", command=self.clear)
         self.btn_clear.pack(side="left")
         Tooltip(self.btn_clear, "Retire toutes les photos de la liste (les fichiers ne sont pas supprimés).")
-        Tooltip(self.btn_dir, "Ajouter toutes les photos d'un dossier (et de ses sous-dossiers).")
-        Tooltip(self.btn_add, "Choisir une ou plusieurs photos. Tu peux aussi glisser des photos sur l'icône du programme.")
+        Tooltip(self.btn_dir, "Ajouter toutes les photos et vidéos d'un dossier (et de ses sous-dossiers).")
+        Tooltip(self.btn_add, "Choisir des photos ou des vidéos. Tu peux aussi les glisser sur l'icône du programme.")
 
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
         ttk.Label(top, text="Style :").pack(side="left")
@@ -266,6 +314,14 @@ class App(tk.Tk):
         ss.pack(side="left", padx=4)
         Tooltip(ss, "À droite : trouve plus de visages, mais aussi plus de fausses détections.\n"
                     "La détection est relancée automatiquement (tes zones manuelles sont gardées).")
+        ttk.Label(r1b, text="   Analyse des vidéos :").pack(side="left")
+        self.vspeed = tk.StringVar(value="Auto")
+        cv = ttk.Combobox(r1b, textvariable=self.vspeed, values=list(SPEEDS), state="readonly", width=8)
+        cv.pack(side="left", padx=4)
+        cv.bind("<<ComboboxSelected>>", lambda e: self.reanalyse_videos())
+        Tooltip(cv, "Précise : 10 analyses par seconde de film. Rapide : 4 par seconde, plus de « passages à "
+                    "risque » à vérifier. Auto : précise jusqu'à 3 minutes, rapide au-delà.\n"
+                    "Changer ce réglage relance l'analyse des vidéos.")
 
         r1c = ttk.Frame(self.adv)
         r1c.pack(fill="x", pady=(4, 0))
@@ -354,7 +410,45 @@ class App(tk.Tk):
         self.canvas = tk.Canvas(right, background="#2b2b2b", highlightthickness=0, cursor="crosshair")
         self.canvas.pack(fill="both", expand=True)
 
-        tools = ttk.Frame(right, padding=(0, 4))
+        # --- Lecteur vidéo (affiché seulement pour une vidéo) ---------------------
+        self.vbar = ttk.Frame(right)
+        self.timeline = tk.Canvas(self.vbar, height=50, background="#1e1e1e", highlightthickness=0, cursor="hand2")
+        self.timeline.pack(fill="x", pady=(4, 2))
+        Tooltip(self.timeline, "Frise de la vidéo : une barre par visage suivi (rouge), zone manuelle (bleu), "
+                               "objet (orange). ▼ orange = passage à risque à vérifier (gris : déjà vu). "
+                               "Clique ou fais glisser pour te déplacer.")
+        self.timeline.bind("<Configure>", lambda e: self._draw_timeline())
+        self.timeline.bind("<Button-1>", self._on_timeline)
+        self.timeline.bind("<B1-Motion>", self._on_timeline)
+        ctl = ttk.Frame(self.vbar)
+        ctl.pack(fill="x")
+        self.btn_play = ttk.Button(ctl, text="▶ Lire", width=9, command=self.toggle_play)
+        self.btn_play.pack(side="left")
+        for txt, d, sec, tip in (("◀◀", -1, True, "Reculer d'une seconde"), ("◀", -1, False, "Image précédente"),
+                                 ("▶", 1, False, "Image suivante"), ("▶▶", 1, True, "Avancer d'une seconde")):
+            bb = ttk.Button(ctl, text=txt, width=4, command=lambda d=d, s=sec: self.seek_rel(d, s))
+            bb.pack(side="left", padx=1)
+            Tooltip(bb, tip)
+        self.time_lbl = ttk.Label(ctl, text="", width=18, anchor="center")
+        self.time_lbl.pack(side="left", padx=6)
+        self.btn_risk = ttk.Button(ctl, text="⚠ Passage à risque suivant", command=lambda: self.goto_risk(any_risk=True))
+        self.btn_risk.pack(side="left")
+        Tooltip(self.btn_risk, "Va au prochain moment où un visage a pu échapper à la détection. "
+                               "« Suivante ▶ » parcourt aussi ces passages avant de valider la vidéo.")
+        self.btn_zend = ttk.Button(ctl, text="Fin ici ⏭", command=lambda: self.zone_limit(end=True))
+        self.btn_zend.pack(side="right")
+        self.btn_zstart = ttk.Button(ctl, text="⏮ Début ici", command=lambda: self.zone_limit(end=False))
+        self.btn_zstart.pack(side="right", padx=2)
+        self.btn_zmove = ttk.Button(ctl, text="📍 Replacer ici", command=lambda: self.set_draw("replace"))
+        self.btn_zmove.pack(side="right", padx=2)
+        for bb, tip in ((self.btn_zmove, "Zone manuelle sélectionnée : redessine-la à sa place sur cette image. "
+                                         "Entre deux positions, elle se déplace toute seule."),
+                        (self.btn_zstart, "Zone manuelle sélectionnée : elle commence à cette image."),
+                        (self.btn_zend, "Zone manuelle sélectionnée : elle s'arrête à cette image "
+                                        "(par défaut, elle dure jusqu'à la fin de la vidéo).")):
+            Tooltip(bb, tip)
+
+        tools = self.tools = ttk.Frame(right, padding=(0, 4))
         tools.pack(fill="x")
         self.btn_add_face = ttk.Button(tools, text="➕ Visage oublié",
                                        command=lambda: self.set_draw("visage"))
@@ -391,6 +485,7 @@ class App(tk.Tk):
         self.canvas.bind("<BackSpace>", lambda e: self.delete_selected_box())
         self.canvas.bind("<Left>", lambda e: self.step(-1))
         self.canvas.bind("<Right>", lambda e: self.step(1, mark=True))
+        self.canvas.bind("<space>", lambda e: self.toggle_play())
         self.bind("<Escape>", lambda e: self.set_draw(None))
 
         # --- Barre du bas -----------------------------------------------------------
@@ -407,7 +502,7 @@ class App(tk.Tk):
         self.out_lbl = ttk.Label(bottom, text="→ dossier « anonymise »", foreground="#555")
         self.out_lbl.pack(side="right", padx=6)
         Tooltip(bo, "Par défaut, un dossier « anonymise » est créé à côté des photos. "
-                    "Les photos d'origine ne sont jamais modifiées.")
+                    "Les photos d'origine ne sont jamais modifiées. Les vidéos sont enregistrées en MP4, sans le son.")
         self.status = ttk.Label(bottom, text="")
         self.status.pack(side="left")
 
@@ -517,14 +612,17 @@ class App(tk.Tk):
         self._on_strength(redraw=False)
         self.redraw()
 
+    def _has_video(self) -> bool:
+        return any(i.is_video for i in self.items)
+
     def _on_strength(self, redraw: bool = True) -> None:
         if self._terrain():
-            if self.strength.get() < core.min_safe_strength():
-                self.strength.set(core.min_safe_strength())
+            if self.strength.get() < core.min_safe_strength(self._has_video()):
+                self.strength.set(core.min_safe_strength(self._has_video()))
             if self.margin.get() < core.MIN_SAFE_MARGIN:
                 self.margin.set(core.MIN_SAFE_MARGIN)
         self.strength_val.configure(text=f"{round(self.strength.get() * 100)} %")
-        level, msg = core.safety(self._mode_key(), self._strength(), self._margin())
+        level, msg = core.safety(self._mode_key(), self._strength(), self._margin(), self._has_video())
         bg, fg = SAFETY_COLORS[level]
         self.safety_lbl.configure(text=f"{SAFETY_ICONS[level]}  {msg}", bg=bg, fg=fg)
         if redraw and self.preview.get():
@@ -542,6 +640,8 @@ class App(tk.Tk):
                               "(maintiens le clic gauche et fais glisser · Échap pour annuler)")
         elif kind == "objet":
             self.hint_text = "✏  Dessine un rectangle sur ce qu'il faut cacher\n(badge, plaque, tatouage… · Échap pour annuler)"
+        elif kind == "replace":
+            self.hint_text = "✏  Redessine la zone sélectionnée à sa place sur cette image\n(Échap pour annuler)"
         else:
             self.hint_text = ""
         self.redraw()
@@ -555,15 +655,18 @@ class App(tk.Tk):
     def pick_files(self) -> None:
         if self.busy:
             return
-        exts = " ".join("*" + e for e in sorted(core.IMAGE_EXTS))
-        files = filedialog.askopenfilenames(title="Choisir des photos",
-                                            filetypes=[("Images", exts), ("Tous", "*.*")])
+        def pat(exts):
+            return " ".join("*" + e for e in sorted(exts))
+        files = filedialog.askopenfilenames(title="Choisir des photos ou des vidéos",
+                                            filetypes=[("Photos et vidéos", pat(core.MEDIA_EXTS)),
+                                                       ("Photos", pat(core.IMAGE_EXTS)),
+                                                       ("Vidéos", pat(core.VIDEO_EXTS)), ("Tous", "*.*")])
         self.add_paths(list(files))
 
     def pick_folder(self) -> None:
         if self.busy:
             return
-        d = filedialog.askdirectory(title="Choisir un dossier de photos")
+        d = filedialog.askdirectory(title="Choisir un dossier de photos ou de vidéos")
         if d:
             self.add_paths([d])
 
@@ -587,7 +690,7 @@ class App(tk.Tk):
             else:
                 files = [p]
             for f in files:
-                if os.path.normcase(f) not in known and os.path.splitext(f)[1].lower() in core.IMAGE_EXTS:
+                if os.path.normcase(f) not in known and os.path.splitext(f)[1].lower() in core.MEDIA_EXTS:
                     known.add(os.path.normcase(f))
                     new.append(Item(f))
         if skipped:
@@ -601,16 +704,37 @@ class App(tk.Tk):
         self.items.extend(new)
         for it in new:
             self.listbox.insert("end", it.label)
-            self.jobs.put(("detect", it, self._threshold()))
+            self._queue(it)
+        self._on_strength(redraw=False)  # une vidéo rend le seuil d'anonymat plus strict
         if not skipped:
             self._update_progress()
         if self.current is None:
             self.select_index(first)
 
+    def _queue(self, it: Item) -> None:
+        if it.is_video:
+            it.gen += 1
+            self.vjobs.put((it, it.gen, SPEEDS.get(self.vspeed.get(), "auto")))
+        else:
+            self.jobs.put(("detect", it, self._threshold()))
+
+    def reanalyse_videos(self) -> None:
+        if self.busy:
+            return
+        for it in self.items:
+            if it.is_video and it.state != "erreur":
+                it.state, it.progress = "attente", 0.0
+                self._queue(it)
+                self._refresh_row(it)
+        self.redraw()
+
     def clear(self) -> None:
         if self.busy:
             return
         self._purge_jobs()
+        for it in self.items:
+            it.cancelled = True
+        self._close_reader()
         self.items.clear()
         self.listbox.delete(0, "end")
         self.current = None
@@ -618,11 +742,12 @@ class App(tk.Tk):
         self.redraw()
 
     def _purge_jobs(self) -> None:
-        try:
-            while True:
-                self.jobs.get_nowait()
-        except queue.Empty:
-            pass
+        for q in (self.jobs, self.vjobs):
+            try:
+                while True:
+                    q.get_nowait()
+            except queue.Empty:
+                pass
 
     def remove_selected(self) -> None:
         if self.busy:
@@ -634,9 +759,13 @@ class App(tk.Tk):
         if not messagebox.askyesno(APP_NAME, f"Retirer « {os.path.basename(self.items[idx].path)} » de la liste ?\n"
                                              "(le fichier n'est pas supprimé de ton ordinateur)"):
             return
+        self.items[idx].cancelled = True
+        if self.items[idx] is self.current:
+            self._close_reader()
         del self.items[idx]
         self.listbox.delete(idx)
         self.current = None
+        self._on_strength(redraw=False)
         if self.items:
             self.select_index(min(idx, len(self.items) - 1))
         else:
@@ -664,6 +793,42 @@ class App(tk.Tk):
                 if job != "probe":
                     self.results.put(("err", it, f"{type(exc).__name__} : {exc}"))
 
+    def _vworker(self) -> None:
+        """Analyse des vidéos (fil à part : une longue vidéo ne bloque pas les photos)."""
+        while True:
+            it, gen, speed = self.vjobs.get()
+            if it.cancelled or gen != it.gen:
+                continue
+
+            def stop(it=it, gen=gen) -> bool:
+                return it.cancelled or gen != it.gen
+
+            last = [0.0]
+
+            def prog(fr: float, it=it, gen=gen, last=last) -> None:
+                if fr - last[0] >= 0.01:
+                    last[0] = fr
+                    self.results.put(("vprog", it, (gen, fr)))
+
+            try:
+                self.results.put(("start", it, None))
+                res = video.analyse(it.path, self.vdetector, speed, prog, stop)
+                self.results.put(("vok", it, (gen, res)))
+            except video.Cancelled:
+                continue
+            except Exception as exc:  # vidéo abîmée, format inconnu...
+                self.results.put(("err", it, f"{type(exc).__name__} : {exc}"))
+
+    def _rebuild(self, it: Item) -> None:
+        """Pistes et passages à risque recalculés (seuil / sensibilité), sans relire la vidéo."""
+        def sig(tracks):
+            return [(t.keys()[0], t.keys()[-1]) for t in tracks]
+        old = sig(it.tracks)
+        it.tracks = video.build_tracks(it.cands, self._threshold(), it.vstep, it.vinfo, it.vrejected)
+        it.risks = video.find_risks(it.tracks, it.vinfo, it.vstep)
+        if it.reviewed and sig(it.tracks) != old:
+            it.reviewed = False  # les zones ont changé : à revérifier
+
     def _poll(self) -> None:
         try:
             while True:
@@ -680,8 +845,23 @@ class App(tk.Tk):
                     box, score, (W, H) = data
                     self._learn("rate", score, box.w, box.h, W, H)
                     continue
+                if kind == "vprog":
+                    gen, it.progress = data
+                    if gen == it.gen:
+                        self._refresh_row(it)
+                        if it is self.current:
+                            self._draw_timeline()
+                    continue
                 if kind == "start":
                     it.state = "analyse"
+                elif kind == "vok":
+                    gen, (info, step, cands) = data
+                    if gen != it.gen:
+                        continue
+                    it.vinfo, it.vstep, it.cands, it.size = info, step, cands, (info.width, info.height)
+                    it.progress = 1.0
+                    self._rebuild(it)
+                    it.state = "ok"
                 elif kind == "ok":
                     data, it.size = data
                     fresh = [b for b in data if not any(core._overlap(b, r) > 0.5 for r in it.rejected)]
@@ -707,14 +887,27 @@ class App(tk.Tk):
         if self.busy:
             return
         for it in self.items:
-            if it.state != "erreur":
+            if it.is_video:
+                if it.cands and it.state in ("ok", "fait"):  # pas besoin de relire la vidéo
+                    self._rebuild(it)
+                    self._refresh_row(it)
+            elif it.state != "erreur":
                 it.state = "attente"
                 self._refresh_row(it)
                 self.jobs.put(("detect", it, self._threshold()))
         self.redraw()
 
     def clear_boxes(self) -> None:
-        if self.current and self.current.boxes and messagebox.askyesno(
+        it = self.current
+        if it and it.is_video and it.all_tracks and messagebox.askyesno(
+                APP_NAME, "Supprimer toutes les zones de cette vidéo, sur toute sa durée ?"):
+            for t in it.tracks:
+                it.vrejected += list(t.samples.items())
+            it.tracks, it.mtracks, it.risks = [], [], []
+            self.sel_box = None
+            self._refresh_row(it)
+            self.redraw()
+        elif it and not it.is_video and it.boxes and messagebox.askyesno(
                 APP_NAME, "Supprimer toutes les zones de cette photo ?"):
             self.current.boxes = []
             self.sel_box = None
@@ -747,17 +940,27 @@ class App(tk.Tk):
         else:
             self.status.configure(text="")
 
+    def _view(self, it: Item | None = None) -> list[tuple[core.Box, object]]:
+        """Zones visibles : (cadre, propriétaire). Propriétaire = le cadre (photo) ou sa piste (vidéo)."""
+        it = it or self.current
+        if it is None:
+            return []
+        if it.is_video:
+            return [(b, t) for t in it.all_tracks if (b := t.box_at(it.pos)) is not None]
+        return [(b, b) for b in it.boxes]
+
     def _doubtful(self, it: Item) -> list[int]:
         """Numéros des zones auto qui ressemblent à une fausse détection (petites ou peu sûres)."""
-        autos = [b for b in it.boxes if not b.manual]
+        view = self._view(it)
+        autos = [b for b, _ in view if not b.manual]
         if not autos:
             return []
         if self._learning() and it.size[0] and self.learner.trained(self.detector.backend):
             W, H = it.size
-            return [n for n, b in enumerate(it.boxes, 1) if not b.manual and
+            return [n for n, (b, _) in enumerate(view, 1) if not b.manual and
                     (self.learner.p_false(self.detector.backend, b.score, b.w, b.h, W, H) or 0) > learning.FALSE_PROBA]
         big = max(b.w for b in autos)
-        return [n for n, b in enumerate(it.boxes, 1)
+        return [n for n, (b, _) in enumerate(view, 1)
                 if not b.manual and (b.score < 0.6 or (len(autos) > 1 and b.w < 0.45 * big))]
 
     def _update_review(self) -> None:
@@ -770,6 +973,9 @@ class App(tk.Tk):
             self.review_lbl.configure(text="")
             return
         i = self.items.index(it) + 1
+        if it.is_video:
+            self.review_lbl.configure(text=self._video_review_text(it, i))
+            return
         if it.state in ("attente", "analyse"):
             txt = f"Photo {i} / {len(self.items)} · recherche des visages…"
         elif it.state == "erreur":
@@ -787,6 +993,29 @@ class App(tk.Tk):
             txt += "  ✔" if it.reviewed else ""
         self.review_lbl.configure(text=txt)
 
+    def _video_review_text(self, it: Item, i: int) -> str:
+        head = f"Vidéo {i} / {len(self.items)}"
+        if it.state == "attente":
+            return f"{head} · en attente d'analyse"
+        if it.state == "analyse":
+            return f"{head} · analyse des visages… {round(it.progress * 100)} %"
+        if it.state == "erreur":
+            return f"{head} · illisible"
+        n, o = it.n_faces, len(it.all_tracks) - it.n_faces
+        txt = f"{head} · {n} visage{'s' if n > 1 else ''} suivi{'s' if n > 1 else ''}"
+        if o:
+            txt += f" + {o} autre{'s' if o > 1 else ''} zone{'s' if o > 1 else ''}"
+        r = self.cur_risk
+        fps = it.vinfo.fps if it.vinfo else 25
+        if r in it.risks and abs(it.pos - r.frame) <= 2 * fps:
+            txt += f"\n⚠ Passage {it.risks.index(r) + 1} / {len(it.risks)} : " + r.reason.replace("\n", " · ")
+        elif it.unseen_risks:
+            k = len(it.unseen_risks)
+            txt += f" — {k} passage{'s' if k > 1 else ''} à risque à vérifier : « Suivante ▶ » t'y emmène"
+        else:
+            txt += " — lis la vidéo et vérifie qu'aucun visage n'est oublié"
+        return txt + "  · 🔇 son supprimé" + ("  ✔" if it.reviewed else "")
+
     # ========================================================== aperçu ==
     def select_index(self, idx: int) -> None:
         self.listbox.selection_clear(0, "end")
@@ -803,11 +1032,30 @@ class App(tk.Tk):
             return
         self.current = it
         self.sel_box = None
+        self.cur_risk = None
+        self._close_reader()
         self.set_draw(None)
+        if it.is_video:
+            self.vbar.pack(fill="x", before=self.tools)
+        else:
+            self.vbar.pack_forget()
         try:
-            W, _ = core.image_size(it.path)
-            self.proxy, _ = core.load_image_full(it.path, max_side=PROXY_SIDE)
-            self.proxy_scale = self.proxy.shape[1] / W
+            if it.is_video:
+                if it.vinfo is None:
+                    it.vinfo = video.probe(it.path)
+                    it.size = (it.vinfo.width, it.vinfo.height)
+                self.reader = video.Reader(it.path, VIDEO_SIDE)
+                self.proxy = self.reader.frame(it.pos)
+                if self.proxy is None:
+                    it.pos = 0
+                    self.proxy = self.reader.frame(0)
+                if self.proxy is None:
+                    raise OSError("aucune image lisible dans cette vidéo")
+                self.proxy_scale = self.proxy.shape[1] / it.vinfo.width
+            else:
+                W, _ = core.image_size(it.path)
+                self.proxy, _ = core.load_image_full(it.path, max_side=PROXY_SIDE)
+                self.proxy_scale = self.proxy.shape[1] / W
         except Exception as exc:
             self.proxy = None
             if not it.error:
@@ -818,6 +1066,9 @@ class App(tk.Tk):
     def step(self, d: int, mark: bool = False) -> None:
         if not self.items:
             return
+        it = self.current
+        if mark and it and it.is_video and it.state in ("ok", "fait") and self.goto_risk():
+            return  # vidéo : d'abord tous ses passages à risque
         if mark and self.current and self.current.state in ("ok", "fait"):
             self.current.reviewed = True
             self._refresh_row(self.current)
@@ -851,9 +1102,10 @@ class App(tk.Tk):
         c = self.canvas
         c.delete("all")
         cw, ch = max(c.winfo_width(), 50), max(c.winfo_height(), 50)
+        self._draw_timeline()
         if self.current is None:
             c.create_text(cw // 2, ch // 2, fill="#aaa", font=("Segoe UI", 14), justify="center",
-                          text="Ajoute des photos avec « ➕ Ajouter des photos… »\n"
+                          text="Ajoute des photos ou des vidéos avec « ➕ Photos / vidéos… »\n"
                                "(ou glisse-les sur l'icône du programme)")
             return
         if self.proxy is None:
@@ -864,8 +1116,9 @@ class App(tk.Tk):
         mode = self._mode_key()
         img = self.proxy
         ps = self.proxy_scale
-        if self.preview.get() and self.current.boxes:
-            img = core.anonymize(img, [b.scaled(ps) for b in self.current.boxes], mode, self._shape(),
+        view = self._view()
+        if self.preview.get() and view:
+            img = core.anonymize(img, [b.scaled(ps) for b, _ in view], mode, self._shape(),
                                  self._margin(), strength=self._strength())
         self.view_scale = min(cw / W, ch / H, 1.0 / ps if ps < 1 else 1.0)
         dw, dh = max(1, int(W * self.view_scale)), max(1, int(H * self.view_scale))
@@ -876,7 +1129,7 @@ class App(tk.Tk):
         k_full = 1 / ps
         self._handles = []
         doubtful = self._doubtful(self.current)
-        for n, b in enumerate(self.current.boxes, 1):
+        for n, (b, owner) in enumerate(view, 1):
             if mode == "bandeau" and b.kind == "visage":
                 m = 0
             else:
@@ -884,10 +1137,11 @@ class App(tk.Tk):
                 m = core.effective_margin(b, self._margin(), bs, bm)
             e = b.expanded(m, int(W * k_full), int(H * k_full))
             x0, y0, x1, y1 = self._box_canvas(e)
-            col = COL["sel"] if b is self.sel_box else (
+            sel = owner is self.sel_box
+            col = COL["sel"] if sel else (
                 COL["objet"] if b.kind == "objet" else COL["manuel"] if b.manual else COL["auto"])
-            width = 3 if b is self.sel_box else 2
-            dash = (5, 3) if self.preview.get() and b is not self.sel_box else None
+            width = 3 if sel else 2
+            dash = (5, 3) if self.preview.get() and not sel else None
             c.create_rectangle(x0, y0, x1, y1, outline=col, width=width, dash=dash)
             tag = f"{n} ?" if n in doubtful else str(n)
             tw = 14 + 7 * len(tag)
@@ -896,10 +1150,13 @@ class App(tk.Tk):
             # petite croix pour supprimer la zone d'un clic
             c.create_rectangle(x1 - 16, y0 - 16, x1, y0, fill="#222", outline=col)
             c.create_text(x1 - 8, y0 - 8, text="✕", fill="white", font=("Segoe UI", 8, "bold"))
-            self._handles.append(((x1 - 16, y0 - 16, x1, y0), b))
+            self._handles.append(((x1 - 16, y0 - 16, x1, y0), owner))
         if self.current.state in ("attente", "analyse"):
+            msg = "Recherche des visages…"
+            if self.current.is_video:
+                msg = f"Analyse de la vidéo… {round(self.current.progress * 100)} %"
             c.create_text(self.offset[0] + 10, self.offset[1] + 10, anchor="nw", fill="yellow",
-                          font=("Segoe UI", 12, "bold"), text="Recherche des visages…")
+                          font=("Segoe UI", 12, "bold"), text=msg)
         self._draw_hint()
 
     def _draw_hint(self) -> None:
@@ -921,15 +1178,16 @@ class App(tk.Tk):
         fw, fh = W / self.proxy_scale, H / self.proxy_scale
         return int(max(0, min(fw, (x - ox) / k))), int(max(0, min(fh, (y - oy) / k)))
 
-    def _box_at(self, x: float, y: float) -> core.Box | None:
+    def _box_at(self, x: float, y: float) -> object | None:
+        """Propriétaire (cadre ou piste) de la plus petite zone sous la souris."""
         hits = []
-        for b in self.current.boxes:
+        for b, owner in self._view():
             bm, bs = core.box_mode(b, self._mode_key(), self._shape())
             x0, y0, x1, y1 = self._box_canvas(b.expanded(
                 core.effective_margin(b, self._margin(), bs, bm), 10 ** 9, 10 ** 9))
             if x0 <= x <= x1 and y0 <= y <= y1:
-                hits.append(b)
-        return min(hits, key=lambda b: b.w * b.h) if hits else None
+                hits.append((b.w * b.h, id(owner), owner))
+        return min(hits, key=lambda h: h[:2])[2] if hits else None
 
     def on_press(self, e) -> None:
         self.canvas.focus_set()  # Suppr agit sur la zone, plus sur la liste
@@ -945,7 +1203,8 @@ class App(tk.Tk):
                 self.sel_box = hit
                 self.redraw()
                 return
-        self.sel_box = None
+        if self.draw_kind != "replace":  # « Replacer ici » agit sur la zone sélectionnée
+            self.sel_box = None
         self.drag_start = (e.x, e.y)
         col = COL["objet"] if self.draw_kind == "objet" else COL["manuel"]
         self.drag_rect = self.canvas.create_rectangle(e.x, e.y, e.x, e.y, outline=col, width=2, dash=(3, 2))
@@ -961,12 +1220,25 @@ class App(tk.Tk):
         x1, y1 = self._to_full(e.x, e.y)
         self.drag_rect = None
         if abs(x1 - x0) > 3 and abs(y1 - y0) > 3:
+            it = self.current
             kind = self.draw_kind or "visage"
-            b = core.Box(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0), manual=True, kind=kind)
-            self.current.boxes.append(b)
-            self.sel_box = b
-            if kind == "visage" and self._learning():
-                self.jobs.put(("probe", self.current, b))
+            sel = self.sel_box
+            if it.is_video and kind == "replace" and isinstance(sel, video.Track) and sel in it.mtracks:
+                sel.set(it.pos, core.Box(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0), 1.0, True, sel.kind))
+                sel.start, sel.end = min(sel.start, it.pos), max(sel.end, it.pos)
+            elif it.is_video:
+                b = core.Box(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0), manual=True,
+                             kind="visage" if kind == "replace" else kind)
+                t = video.manual_track(it.pos, b, b.kind, it.vinfo)
+                it.mtracks.append(t)
+                self.sel_box = t
+            else:
+                kind = "visage" if kind == "replace" else kind
+                b = core.Box(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0), manual=True, kind=kind)
+                self.current.boxes.append(b)
+                self.sel_box = b
+                if kind == "visage" and self._learning():
+                    self.jobs.put(("probe", self.current, b))
             if self.current.state == "fait":
                 self.current.state = "ok"
             self._refresh_row(self.current)
@@ -984,20 +1256,35 @@ class App(tk.Tk):
         if not self.current:
             return
         dz = set(self._doubtful(self.current))
-        for n, b in reversed(list(enumerate(self.current.boxes, 1))):
+        for n, (_, owner) in reversed(list(enumerate(self._view(), 1))):
             if n in dz:
-                self._remove_box(b)
+                self._remove_box(owner)
 
     def delete_selected_box(self) -> None:
         if self.focus_get() is self.listbox:
             return
         if self.sel_box is not None:
             self._remove_box(self.sel_box)
-        elif self.current and self.current.boxes:
+        elif self.current and self.current.n_zones:
             self.flash_hint("Clique d'abord sur un cadre pour le sélectionner (il devient jaune),\n"
                             "ou clique sur sa petite croix ✕.")
 
-    def _remove_box(self, b: core.Box) -> None:
+    def _remove_box(self, b: object) -> None:
+        it = self.current
+        if it.is_video:
+            if b in it.mtracks:
+                it.mtracks.remove(b)
+            elif b in it.tracks:  # le visage disparaît sur TOUTE la vidéo, et ne revient pas
+                it.tracks.remove(b)
+                it.vrejected += list(b.samples.items())
+                tb = b.typical()
+                self._learn("faux", b.score, tb.w, tb.h, *it.size)
+                it.learned = False
+                it.risks = video.find_risks(it.tracks, it.vinfo, it.vstep)
+            self.sel_box = None
+            self._refresh_row(it)
+            self.redraw()
+            return
         if b in self.current.boxes:
             self.current.boxes.remove(b)
             if not b.manual:
@@ -1011,7 +1298,6 @@ class App(tk.Tk):
     # ========================================================== export ==
     def export(self) -> None:
         if self.busy:
-            import time
             if time.monotonic() - self._export_start > 1.0:  # évite qu'un double-clic annule
                 self.cancel = True
                 self.btn_export.configure(text="Annulation…")
@@ -1028,7 +1314,7 @@ class App(tk.Tk):
                                            "ou désactive le mode terrain en connaissance de cause.")
             return
         mode, shape, margin, strength = self._mode_key(), self._shape(), self._margin(), self._strength()
-        level, msg = core.safety(mode, strength, margin)
+        level, msg = core.safety(mode, strength, margin, self._has_video())
         if level != "ok" and not messagebox.askyesno(
                 APP_NAME, "⚠ Ce réglage ne garantit PAS l'anonymat :\n\n" + msg +
                           "\n\nPour un anonymat total : un style 🔒 avec une force suffisante.\n\n"
@@ -1044,14 +1330,19 @@ class App(tk.Tk):
                           "La détection automatique peut rater des visages.\n\nEnregistrer quand même ?",
                 icon="warning"):
             return
-        no_face = [i for i in todo if not i.boxes]
+        no_face = [i for i in todo if not i.n_zones]
         if no_face and not messagebox.askyesno(
-                APP_NAME, f"{len(no_face)} photo(s) sans aucune zone : elles seront copiées sans modification "
-                          "(mais nettoyées de leurs informations cachées).\n\nContinuer ?"):
+                APP_NAME, f"{len(no_face)} photo(s) ou vidéo(s) sans aucune zone : elles seront copiées sans "
+                          "modification (mais nettoyées de leurs informations cachées).\n\nContinuer ?"):
+            return
+        if any(i.is_video for i in todo) and not self.cfg.get("video_info_vu") and not messagebox.askyesno(
+                APP_NAME, "Vidéos : elles seront enregistrées en MP4, SANS LE SON (une voix identifie "
+                          "aussi bien qu'un visage).\n\nFormat lisible avec VLC et le lecteur de Windows, "
+                          "mais pas toujours par les téléphones ou les sites web.\n\nContinuer ?"):
             return
         delete = self.advanced.get() and self.delete_orig.get()
         if delete and not messagebox.askyesno(
-                APP_NAME, f"⚠ Les {len(todo)} photo(s) d'ORIGINE seront écrasées puis supprimées, "
+                APP_NAME, f"⚠ Les {len(todo)} photo(s) ou vidéo(s) d'ORIGINE seront écrasées puis supprimées, "
                           "sans passer par la corbeille. C'est définitif.\n\n"
                           "Limites : sur SSD, clé USB, OneDrive/Google Drive ou sauvegardes, des copies "
                           "peuvent subsister.\n\nContinuer ?", icon="warning"):
@@ -1066,7 +1357,11 @@ class App(tk.Tk):
             messagebox.showerror(APP_NAME, f"Impossible de préparer les noms de fichiers : {exc}")
             return
 
-        import time
+        self.cfg["video_info_vu"] = self.cfg.get("video_info_vu") or any(i.is_video for i in todo)
+        save_config(self.cfg)
+        self._stop_play()
+        if delete:
+            self._close_reader()  # Windows : une vidéo ouverte ne peut pas être effacée
         self._export_start = time.monotonic()
         self.busy, self.cancel = True, False
         self.btn_export.configure(text="✖ Annuler")
@@ -1075,7 +1370,7 @@ class App(tk.Tk):
         self.progress.configure(maximum=len(todo), value=0)
         self.status.configure(text="Enregistrement…")
 
-        jobs = [(it, plan[it.path], list(it.boxes)) for it in todo]
+        jobs = [(it, plan[it.path], list(it.all_tracks) if it.is_video else list(it.boxes)) for it in todo]
         n_reused = len(reuse)
 
         def run():  # thread : ne touche JAMAIS à Tk, communique par la file self.results
@@ -1086,9 +1381,14 @@ class App(tk.Tk):
                         break
                     try:
                         os.makedirs(os.path.dirname(dst), exist_ok=True)
-                        rgb, alpha = core.load_image_full(it.path)
-                        out = core.anonymize(rgb, boxes, mode, shape, margin, strength=strength)
-                        core.save_clean(out, dst, alpha)
+                        if it.is_video:
+                            video.export(it.path, dst, boxes, mode, shape, margin, strength,
+                                         progress=lambda fr, n=n: self.results.put(("exp_prog", n - 1 + fr, None)),
+                                         cancel=lambda: self.cancel)
+                        else:
+                            rgb, alpha = core.load_image_full(it.path)
+                            out = core.anonymize(rgb, boxes, mode, shape, margin, strength=strength)
+                            core.save_clean(out, dst, alpha)
                         written += 1
                         last = dst
                         done_items.append((it, dst))
@@ -1096,6 +1396,8 @@ class App(tk.Tk):
                             core.secure_delete(it.path)
                             deleted += 1
                             gone.append(it)
+                    except video.Cancelled:
+                        break
                     except Exception as exc:
                         errors.append(f"{os.path.basename(it.path)} : {exc}")
                     self.results.put(("exp_prog", n, None))
@@ -1114,6 +1416,10 @@ class App(tk.Tk):
         for it, dst in r["done"]:
             it.state, it.out_path = "fait", dst
             if it.reviewed and not it.learned:  # zones auto confirmées par l'utilisateur
+                if it.is_video:
+                    for t in it.tracks:
+                        tb = t.typical()
+                        self._learn("ok", t.score, tb.w, tb.h, *it.size)
                 for b in it.boxes:
                     if not b.manual:
                         self._learn("ok", b.score, b.w, b.h, *it.size)
@@ -1131,7 +1437,7 @@ class App(tk.Tk):
         for b in (self.btn_add, self.btn_dir, self.btn_clear):
             b.state(["!disabled"])
         self._update_progress()
-        msg = f"{written} photo(s) sur {total} enregistrée(s), sans informations cachées."
+        msg = f"{written} fichier(s) sur {total} enregistré(s), sans informations cachées."
         if self.cancel:
             msg += "\n\nEnregistrement annulé par l'utilisateur."
         if r["reused"]:
@@ -1156,6 +1462,157 @@ class App(tk.Tk):
         elif not last:
             messagebox.showwarning(APP_NAME, msg)
 
+    # ==================================================== lecteur vidéo ==
+    def _close_reader(self) -> None:
+        self._stop_play()
+        if self.reader is not None:
+            self.reader.close()
+            self.reader = None
+
+    def _seek(self, f: int) -> None:
+        it = self.current
+        if not it or not it.is_video or self.reader is None or it.vinfo is None:
+            return
+        it.pos = max(0, min(it.vinfo.frames - 1, int(f)))
+        fr = self.reader.frame(it.pos)
+        if fr is not None:
+            self.proxy = fr
+        self._update_review()
+        self.redraw()
+
+    def seek_rel(self, d: int, seconds: bool = False) -> None:
+        it = self.current
+        if it and it.is_video and it.vinfo:
+            self._stop_play()
+            self._seek(it.pos + d * (round(it.vinfo.fps) if seconds else 1))
+
+    def _on_timeline(self, e) -> None:
+        it = self.current
+        if not it or not it.is_video or not it.vinfo:
+            return
+        self._stop_play()
+        w = max(self.timeline.winfo_width(), 100)
+        f = round((e.x - 8) / max(1, w - 16) * (it.vinfo.frames - 1))
+        it.pos = max(0, min(it.vinfo.frames - 1, f))
+        self._draw_timeline()
+        if self._seek_job is None:  # glisser : on ne décode pas chaque position
+            def go():
+                self._seek_job = None
+                if self.current is it:
+                    self._seek(it.pos)
+            self._seek_job = self.after(40, go)
+
+    def toggle_play(self) -> None:
+        it = self.current
+        if not it or not it.is_video or self.reader is None or it.vinfo is None:
+            return
+        if self.playing:
+            self._stop_play()
+            return
+        if it.pos >= it.vinfo.frames - 1:
+            self._seek(0)
+        self.playing = True
+        self.btn_play.configure(text="⏸ Pause")
+        self._play_tick()
+
+    def _stop_play(self) -> None:
+        self.playing = False
+        try:
+            self.btn_play.configure(text="▶ Lire")
+        except (AttributeError, tk.TclError):
+            pass  # fenêtre pas encore construite ou déjà détruite
+
+    def _play_tick(self) -> None:
+        it = self.current
+        if not self.playing or not it or not it.is_video or self.reader is None or it.vinfo is None:
+            self._stop_play()
+            return
+        t0 = time.perf_counter()
+        fr = self.reader.frame(it.pos + 1) if it.pos + 1 < it.vinfo.frames else None
+        if fr is None:
+            self._stop_play()
+            return
+        it.pos += 1
+        self.proxy = fr
+        self.redraw()
+        if self.cur_risk is not None:
+            self._update_review()
+        spent = (time.perf_counter() - t0) * 1000
+        self.after(max(1, int(1000 / it.vinfo.fps - spent)), self._play_tick)
+
+    def goto_risk(self, any_risk: bool = False) -> bool:
+        """Va au prochain passage à risque (non vu, sauf `any_risk`) ; False s'il n'y en a plus."""
+        it = self.current
+        if not it or not it.is_video or not it.risks:
+            return False
+        pool = it.risks if any_risk else it.unseen_risks
+        if not pool:
+            return False
+        after = [r for r in pool if r.frame > it.pos] if any_risk else [r for r in pool if r.frame >= it.pos]
+        r = (after or pool)[0]
+        it.seen.add(r.frame)
+        self.cur_risk = r
+        self._stop_play()
+        self._refresh_row(it)
+        self._seek(r.frame)
+        return True
+
+    def zone_limit(self, end: bool) -> None:
+        it, t = self.current, self.sel_box
+        if not it or not it.is_video or not isinstance(t, video.Track) or t not in it.mtracks:
+            self.flash_hint("Sélectionne d'abord une zone ajoutée à la main (cadre bleu ou orange).")
+            return
+        if end:
+            t.end = max(it.pos, t.start)
+        else:
+            t.start = min(it.pos, t.end)
+        self.redraw()
+
+    def _draw_timeline(self) -> None:
+        c = self.timeline
+        c.delete("all")
+        it = self.current
+        if not it or not it.is_video or not it.vinfo:
+            return
+        W, H = max(c.winfo_width(), 100), int(c["height"])
+        n, pad = max(1, it.vinfo.frames - 1), 8
+
+        def X(f: int) -> float:
+            return pad + f / n * (W - 2 * pad)
+
+        c.create_rectangle(pad, 14, W - pad, H - 4, fill="#2b2b2b", outline="#444")
+        if it.state in ("attente", "analyse"):
+            c.create_rectangle(pad, 14, X(it.progress * n), H - 4, fill="#3a4a5a", outline="")
+            c.create_text(W // 2, 30, text=f"Analyse… {round(it.progress * 100)} %", fill="#ccc")
+        rows: list[int] = []
+        for t in it.all_tracks:
+            r = next((i for i, e in enumerate(rows) if e < t.start), None)
+            if r is None:
+                if len(rows) < 4:
+                    rows.append(t.end)
+                r = min(len(rows) - 1, 3)
+            else:
+                rows[r] = t.end
+            y = 18 + r * 7
+            col = COL["sel"] if t is self.sel_box else (
+                COL["objet"] if t.kind == "objet" else COL["manuel"] if t.manual else COL["auto"])
+            c.create_rectangle(X(t.start), y, max(X(t.end), X(t.start) + 2), y + 5, fill=col, outline="")
+        for r in it.risks:
+            x = X(r.frame)
+            c.create_polygon(x - 5, 2, x + 5, 2, x, 11, fill="#777" if r.frame in it.seen else "#ff9500", outline="")
+        x = X(it.pos)
+        c.create_line(x, 0, x, H, fill="white", width=2)
+        fps = it.vinfo.fps
+
+        def fmt(f: int) -> str:
+            s = f / fps
+            return f"{int(s // 60):02d}:{s % 60:04.1f}"
+        self.time_lbl.configure(text=f"{fmt(it.pos)} / {fmt(it.vinfo.frames - 1)}")
+        manual_sel = isinstance(self.sel_box, video.Track) and self.sel_box in it.mtracks
+        for b in (self.btn_zmove, self.btn_zstart, self.btn_zend):
+            b.state(["!disabled"] if manual_sel else ["disabled"])
+        self.btn_risk.state(["!disabled"] if it.risks else ["disabled"])
+
     def about(self) -> None:
         engine = {"yunet": "IA (YuNet, empreinte vérifiée)", "haar": "basique (Haar)",
                   "aucun": "aucune"}[self.detector.backend]
@@ -1163,7 +1620,8 @@ class App(tk.Tk):
             f"À propos – {APP_NAME}",
             f"{APP_NAME} – version {__version__}\n\n"
             f"Détection : {engine}\n"
-            f"Photos iPhone (HEIC) : {'oui' if core.HEIF_OK else 'non'}\n\n"
+            f"Photos iPhone (HEIC) : {'oui' if core.HEIF_OK else 'non'}\n"
+            "Vidéos : MP4, son supprimé\n\n"
             "Confidentialité : le programme ne se connecte JAMAIS à Internet. Les photos ne quittent "
             "pas ton ordinateur ; seuls quelques réglages et des statistiques numériques "
             "d'apprentissage sont gardés dans %APPDATA%\\AnonymiseurVisages.\n\n"
@@ -1176,6 +1634,7 @@ class App(tk.Tk):
     _export_start = 0.0
 
     def on_close(self) -> None:
+        self._stop_play()
         if self.busy:
             if not messagebox.askyesno(APP_NAME, "Un enregistrement est en cours.\n"
                                                  "Arrêter après la photo en cours et quitter ?"):
@@ -1214,6 +1673,19 @@ def selftest(argv: list[str]) -> int:
         core.save_clean(core.anonymize(core.load_image(src), [core.Box(100, 100, 80, 80)]), dst)
         lines.append(f"sortie={dst} existe={os.path.exists(dst)}")
         ok &= os.path.exists(dst)
+        # Vidéo : lecture + écriture par le FFmpeg embarqué (DLL d'OpenCV dans le .exe)
+        import cv2
+        vsrc = os.path.join(d, "vidéo test.mp4")
+        wr = cv2.VideoWriter(vsrc, cv2.CAP_FFMPEG, cv2.VideoWriter_fourcc(*"mp4v"), 25, (320, 240))
+        for k in range(12):
+            wr.write(np.random.default_rng(k).integers(0, 255, (240, 320, 3), dtype=np.uint8))
+        wr.release()
+        info, step, cands = video.analyse(vsrc, det)
+        vdst = core.plan_outputs([vsrc])[vsrc]
+        t = video.manual_track(0, core.Box(100, 80, 80, 80), "visage", info)
+        n = video.export(vsrc, vdst, video.build_tracks(cands, 0.6, step, info) + [t])
+        lines.append(f"video={vdst} images={n}/{info.frames}")
+        ok &= n == 12 and info.frames == 12 and os.path.exists(vdst)
         shutil.rmtree(d, ignore_errors=True)
     except Exception as exc:
         lines.append(f"erreur={exc!r}")

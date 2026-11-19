@@ -7,7 +7,7 @@
 ![Hors ligne](https://img.shields.io/badge/r%C3%A9seau-jamais-1b7a34)
 [![Licence MIT](https://img.shields.io/github/license/N4ole/anonymat)](LICENSE)
 
-Logiciel Windows (un seul `.exe`, rien à installer) qui cache les visages sur des photos, avec un **vrai anonymat par défaut** : le visage est détruit, pas seulement flouté, et toutes les informations cachées des photos (GPS, appareil…) sont supprimées. Il fonctionne **entièrement hors ligne**.
+Logiciel Windows (un seul `.exe`, rien à installer) qui cache les visages sur des **photos et des vidéos**, avec un **vrai anonymat par défaut** : le visage est détruit, pas seulement flouté, et toutes les informations cachées (GPS, appareil…) sont supprimées. Il fonctionne **entièrement hors ligne**.
 
 ## Télécharger
 
@@ -25,7 +25,7 @@ Le `.exe` n'est pas signé avec un certificat : SmartScreen peut afficher « Win
 **Mode simple (par défaut)** – choisis un style, ils sont tous réglés pour un anonymat total :
 Flou (recommandé) · Rond flou · Pixels · Émoji 🙂 · Carré noir.
 
-1. `➕ Photos…` / `📁 Dossier…`, ou glisser les photos sur l'icône du .exe (JPEG, PNG, WebP, TIFF, BMP, GIF, **HEIC iPhone**).
+1. `➕ Photos / vidéos…` / `📁 Dossier…`, ou glisser les fichiers sur l'icône du .exe (JPEG, PNG, WebP, TIFF, BMP, GIF, **HEIC iPhone** ; vidéos MP4, MOV, M4V, AVI, MKV, WebM, 3GP, WMV, MTS : voir [Vidéos](#-vidéos)).
 2. Pour chaque photo, vérifie les cadres numérotés puis clique **Suivante ▶** (la photo est marquée ✔). À la dernière, le programme propose d'enregistrer, ou t'emmène aux photos pas encore vérifiées :
    - `➕ Visage oublié` puis dessine un rectangle (la consigne s'affiche sur la photo) ;
    - `🏷 Autre chose à cacher` pour un badge, un nom brodé, une plaque, un tatouage… ;
@@ -48,6 +48,27 @@ Un bandeau indique en permanence le niveau de protection : 🔒 vert = anonymat 
 
 **Mode terrain** (*Méthodes sûres uniquement*) : ne propose que les méthodes 🔒, bloque la force et la marge au-dessus du seuil, et **refuse d'enregistrer sans la détection IA**. Ce réglage (et l'affichage des options avancées) est mémorisé dans `%APPDATA%\AnonymiseurVisages\reglages.json` — aucun nom de photo ni de dossier n'y est écrit.
 
+## 🎬 Vidéos
+
+Une vidéo s'ajoute comme une photo. Elle est d'abord **analysée** (barre de progression dans la liste), puis s'affiche avec un lecteur et une **frise** : une barre par visage suivi, et un ▼ orange pour chaque **passage à risque**.
+
+- **Suivante ▶** emmène à chaque passage à risque, un par un : visage perdu puis retrouvé, détection peu sûre, visage qui apparaît ou disparaît au milieu de l'image. Quand tous ont été vus, la vidéo est marquée ✔. Lis quand même la vidéo (`▶ Lire`, barre d'espace) : la détection peut rater un visage pendant toute une scène.
+- **✕ sur un cadre** : le visage est retiré sur **toute** la vidéo (et ne revient pas si la détection est relancée).
+- **➕ Visage oublié** : la zone dessinée commence à l'image affichée et dure **jusqu'à la fin** de la vidéo. Sélectionne-la, puis :
+  `📍 Replacer ici` sur d'autres images (entre deux positions, elle se déplace toute seule), `⏮ Début ici`, `Fin ici ⏭`.
+- La vidéo est réécrite image par image en **MP4, sans le son** (une voix identifie aussi bien qu'un visage) et sans aucune métadonnée.
+
+Comment aucun visage n'échappe au suivi :
+- le détecteur analyse 10 images par seconde de film (4 pour les vidéos de plus de 3 minutes ; réglable dans ⚙ *Analyse des vidéos*) ;
+- un visage repéré est **suivi même quand il devient difficile à voir** (tête tournée, flou de bougé), y compris en remontant le temps ;
+- entre deux analyses, la zone cachée couvre les deux positions ; un visage perdu moins d'une seconde reste caché pendant le trou ; chaque visage est caché un peu avant sa première et après sa dernière détection ;
+- l'effet doit être plus fort que sur une photo (≤ 8 blocs) : sur une vidéo, les nombreuses images d'un même visage aident à le reconstruire. Le mode simple le respecte toujours.
+
+Limites actuelles :
+- **son supprimé**, sans option pour le garder (une voix déformée est prévue) ;
+- format **MPEG-4 Part 2** : lisible avec VLC et le lecteur de Windows, mais pas toujours par les téléphones ou les sites web (le H.264 est prévu) ;
+- les vidéos à cadence variable (téléphones) sont réécrites à cadence fixe : la durée peut varier très légèrement.
+
 ## 🧠 La détection s'améliore avec tes corrections
 
 Dans **⚙ Options avancées → 🧠 Apprendre de mes corrections** (activé par défaut) :
@@ -56,7 +77,7 @@ Dans **⚙ Options avancées → 🧠 Apprendre de mes corrections** (activé pa
 |---|---|
 | Tu ajoutes un visage oublié | Il regarde si le détecteur l'avait « presque » vu. Si oui, il **abaisse son seuil** la fois suivante pour trouver ce genre de visage. |
 | Tu supprimes une zone détectée | Il apprend à quoi ressemblent **tes** fausses détections et les marque **« ? »** ; le bouton *Enlever les « ? »* les retire d'un coup. |
-| Tu enregistres une photo vérifiée ✔ | Les zones gardées comptent comme de vrais visages. |
+| Tu enregistres une photo ou une vidéo vérifiée ✔ | Les zones gardées comptent comme de vrais visages. |
 
 Garde-fous :
 - le seuil appris ne peut que **descendre** (plus de visages trouvés, jamais moins), avec un plancher ;
@@ -69,7 +90,8 @@ Pourquoi pas un vrai ré-entraînement du réseau de neurones ? Il faudrait cons
 ## Ce qui est garanti / ce qui ne l'est pas
 
 - ✅ Le visage est détruit (réduction à quelques blocs + bruit aléatoire non reproductible), pas seulement flouté.
-- ✅ Aucune métadonnée recopiée (EXIF, GPS, appareil, XMP, miniature EXIF), écriture atomique.
+- ✅ Aucune métadonnée recopiée (EXIF, GPS, appareil, XMP, miniature EXIF ; pour les vidéos, rien du fichier d'origine à part les images), écriture atomique.
+- ✅ Vidéos : visages suivis d'une image à l'autre, passages à risque signalés, son supprimé.
 - ✅ Noms neutres par défaut (le nom d'origine contient souvent date et heure).
 - ✅ L'ellipse, le rond flou et l'émoji sont agrandis pour recouvrir tout le cadre du visage, **y compris collé au bord de la photo** ; les zones manuelles ont une marge minimale.
 - ✅ PNG/WebP transparents : les couleurs cachées sous les pixels transparents sont effacées.
@@ -78,7 +100,8 @@ Pourquoi pas un vrai ré-entraînement du réseau de neurones ? Il faudrait cons
 - ⚠ Le bandeau vert juge la méthode, pas la photo : un badge ou un nom visible reste à masquer à la main.
 - ⚠ La détection automatique peut rater un visage (de dos, masqué, minuscule) : la revue photo par photo reste indispensable. Sans le modèle IA (détection basique), un bandeau rouge le signale.
 - ⚠ L'effacement des originaux écrase puis supprime le fichier, mais sur SSD, clé USB, cloud (OneDrive…) ou sauvegardes, des copies peuvent subsister ; Windows garde aussi des miniatures en cache.
-- ✖ Pas encore géré : vidéo, voix, détection automatique des plaques et tatouages (à masquer à la main).
+- ⚠ Vidéos : l'analyse ne regarde pas chaque image ; le suivi comble les trous, mais un visage qui n'est jamais détecté (de dos, minuscule) doit être ajouté à la main.
+- ✖ Pas encore géré : déformation de la voix (le son est supprimé), détection automatique des plaques et tatouages (à masquer à la main).
 
 ## Compiler soi-même
 
@@ -111,6 +134,7 @@ Publier une version : voir [CONTRIBUTING.md](CONTRIBUTING.md#publier-une-version
 
 - `learning.py` – apprentissage local à partir des corrections
 - `core.py` – détection (scores de confiance 0–1), anonymisation, noms de sortie, sauvegarde sans métadonnées, effacement
+- `video.py` – vidéos : analyse, suivi des visages, passages à risque, export MP4
 - `app.py` – interface Tkinter (+ `--selftest` pour la CI)
 - `version.py` – numéro de version unique (appli, .exe, release)
 - `tests/` – tests pytest (un par bug ou exigence relevés en revue)
@@ -120,4 +144,4 @@ Publier une version : voir [CONTRIBUTING.md](CONTRIBUTING.md#publier-une-version
 
 ## Licence
 
-[MIT](LICENSE) : libre d'utilisation, de modification et de redistribution. Les composants intégrés au `.exe` (OpenCV, YuNet, libheif…) gardent leur propre licence : voir [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[MIT](LICENSE) : libre d'utilisation, de modification et de redistribution. Les composants intégrés au `.exe` (OpenCV, FFmpeg, YuNet, libheif…) gardent leur propre licence : voir [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
