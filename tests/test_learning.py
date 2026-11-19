@@ -102,3 +102,20 @@ def test_oubli(tmp_path):
     L.save()
     L.reset()
     assert not p.exists() and L.events == []
+
+
+def test_oublier_meme_si_fichier_verrouille(tmp_path, monkeypatch):
+    """« Oublier l'apprentissage » doit tenir même si le fichier ne peut pas être supprimé."""
+    p = str(tmp_path / "a.json")
+    L = learning.Learner(p)
+    L.record("faux", "yunet", 0.5, 30, 30, 1000, 800)
+    L.save()
+
+    def refuse(_path):
+        raise PermissionError("fichier verrouillé")
+
+    monkeypatch.setattr(learning.os, "remove", refuse)
+    L.read_only = True  # même en mode terrain, l'oubli doit être effectif
+    L.reset()
+    assert L.read_only
+    assert learning.Learner(p).events == []
