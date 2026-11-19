@@ -26,7 +26,7 @@ YUNET_URLS = [
 # Changer de build ffmpeg : augmenter REVISION dans build_ffmpeg.sh, attendre la pré-release
 # publiée par la CI, puis reporter ici son étiquette et l'empreinte de ffmpeg.exe.
 FFMPEG_TAG = "ffmpeg-9.0.2-1"
-FFMPEG_SHA256 = ""
+FFMPEG_SHA256 = "2be118db3b58b88e7eba962ab2c4e5c50f7dd2f6d7e52131f6529fe94502852f"
 FFMPEG_BASE = f"{REPO_URL}/releases/download/{FFMPEG_TAG}/"
 
 
