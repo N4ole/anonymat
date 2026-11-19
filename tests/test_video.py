@@ -216,3 +216,10 @@ def test_videos_trouvees_et_sorties_ignorees(tmp_path):
     files, skipped = core.scan_images(str(tmp_path))
     assert [os.path.basename(f) for f in files] == ["clip.MOV"] and skipped == 1
     assert core.output_ext("clip.MOV") == ".mp4" and core.is_video("a.mkv") and not core.is_video("a.jpg")
+
+
+
+@pytest.mark.parametrize("valeur,attendu", [(float("nan"), 1), (float("inf"), 1), (0.0, 1), (-3.0, 1), (42.0, 42)])
+def test_nombre_d_images_absurde(valeur, attendu):
+    """Nombre d'images annoncé par le fichier absent ou absurde (NaN, infini, 0…) : jamais de plantage."""
+    assert video.frame_count(valeur) == attendu

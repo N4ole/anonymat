@@ -17,6 +17,7 @@ Principes de sécurité (en plus de ceux de core.py) :
 from __future__ import annotations
 
 import bisect
+import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -71,6 +72,12 @@ def _fps(cap: cv2.VideoCapture) -> float:
     return float(fps) if 1 <= fps <= 1000 else 25.0  # valeur absurde (NaN, 0, 90000…) : 25 i/s
 
 
+def frame_count(n: float) -> int:
+    """Nombre d'images annoncé par le fichier ; 1 s'il est absent ou absurde (NaN, infini, 0…).
+    Ce n'est qu'une estimation : l'analyse recompte les images réelles."""
+    return int(n) if math.isfinite(n) and n >= 1 else 1
+
+
 def probe(path: str) -> VideoInfo:
     """Cadence, nombre d'images (estimé) et taille APRÈS rotation (lue sur la 1re image)."""
     cap = open_capture(path)
@@ -79,7 +86,7 @@ def probe(path: str) -> VideoInfo:
         if not ok:
             raise OSError("aucune image lisible dans cette vidéo")
         n = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        return VideoInfo(_fps(cap), max(1, int(n) if n == n and n > 0 else 1), bgr.shape[1], bgr.shape[0])
+        return VideoInfo(_fps(cap), frame_count(n), bgr.shape[1], bgr.shape[0])
     finally:
         cap.release()
 
