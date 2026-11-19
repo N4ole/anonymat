@@ -44,7 +44,7 @@ else:
 
 a = Analysis(
     ["app.py"],
-    datas=[("icon.ico", "."), ("haar", "haar"), ("models", "models"),
+    datas=[("icon.ico", "."), ("haar", "haar"), ("models", "models"), ("ffmpeg", "ffmpeg"),
            ("LICENSE", "."), ("THIRD_PARTY_NOTICES.md", ".")] + heif_datas,
     binaries=heif_bins,
     hiddenimports=["PIL._tkinter_finder"] + heif_hidden,

@@ -34,6 +34,14 @@ except Exception:  # pragma: no cover - dépend de l'installation
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff", ".gif"}
 if HEIF_OK:
     IMAGE_EXTS |= {".heic", ".heif"}
+# Vidéos : lues par le FFmpeg intégré à OpenCV (LGPL), réécrites en MP4 sans le son.
+VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".wmv", ".mts", ".m2ts"}
+MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
+
+
+def is_video(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in VIDEO_EXTS
+
 
 OUTPUT_FOLDER = "anonymise"
 NEUTRAL_PREFIX = "anonyme_"
@@ -61,6 +69,9 @@ SAFE_MODES = SIMPLE_MODES
 SIMPLE_STRENGTH = 0.75          # force utilisée en mode simple (toujours sûre)
 
 SAFE_BLOCKS = 12   # <= 12 blocs sur la largeur de la zone : anonymat total
+# Vidéo : les nombreuses images d'un même visage (qui bouge sous la grille de blocs)
+# donnent plus de prise à une reconstruction : on exige un effet plus fort.
+VIDEO_SAFE_BLOCKS = 8
 WEAK_BLOCKS = 20   # 13-20 : reconnaissable par un proche / une IA
 MIN_SAFE_MARGIN = 0.10
 ELLIPSE_MARGIN = 0.30           # marge mini pour qu'une ellipse couvre tout le visage
@@ -74,29 +85,36 @@ def blocks_for(strength: float, lo: int = 64, hi: int = 3) -> int:
     return max(hi, int(round(lo * (hi / lo) ** s)))
 
 
-def min_safe_strength() -> float:
+def min_safe_strength(video: bool = False) -> float:
     """Plus petite force (au centième) qui donne l'anonymat total en mode destructif."""
+    limit = VIDEO_SAFE_BLOCKS if video else SAFE_BLOCKS
     for i in range(101):
-        if blocks_for(i / 100) <= SAFE_BLOCKS:
+        if blocks_for(i / 100) <= limit:
             return i / 100
     return 1.0
 
 
-def safety(mode: str, strength: float, margin: float = 0.3) -> tuple[str, str]:
-    """Renvoie (niveau, message clair) ; niveau ∈ ok | moyen | danger."""
+def safety(mode: str, strength: float, margin: float = 0.3, video: bool = False,
+           voice: bool = False) -> tuple[str, str]:
+    """Renvoie (niveau, message clair) ; niveau ∈ ok | moyen | danger.
+    `video` : au moins une vidéo à traiter (seuil plus strict, voir VIDEO_SAFE_BLOCKS).
+    `voice` : le son des vidéos est gardé, voix déformée (jamais « anonymat total »)."""
     b = blocks_for(strength)
     if mode in ("noir", "emoji"):
         level, msg = "ok", "Anonymat total : le visage est entièrement recouvert."
     elif mode in ("pixel", "flou", "rond_flou"):
-        if b <= SAFE_BLOCKS:
+        if b <= (VIDEO_SAFE_BLOCKS if video else SAFE_BLOCKS):
             level, msg = "ok", "Anonymat total : le visage est détruit, impossible de le retrouver."
+        elif video and b <= SAFE_BLOCKS:
+            level, msg = "moyen", ("Effet un peu faible pour une vidéo : les nombreuses images d'un même visage "
+                                   "aident à le reconstruire. Pousse le curseur « Force » vers la droite.")
         elif b <= WEAK_BLOCKS:
             level, msg = "moyen", ("Effet trop faible : un proche ou une IA pourrait reconnaître la personne. "
                                    "Pousse le curseur « Force » vers la droite.")
         else:
             level, msg = "danger", "Effet léger : le visage reste reconnaissable. Pousse le curseur « Force » vers la droite."
     elif mode == "pixel_classique":
-        if b <= SAFE_BLOCKS:
+        if b <= (VIDEO_SAFE_BLOCKS if video else SAFE_BLOCKS):
             level, msg = "moyen", "Pixelisation classique : correcte, mais des outils d'IA savent parfois retrouver l'identité."
         else:
             level, msg = "danger", "Pixelisation classique légère : visage reconnaissable ou reconstructible par IA."
@@ -108,6 +126,10 @@ def safety(mode: str, strength: float, margin: float = 0.3) -> tuple[str, str]:
         return "danger", "Méthode inconnue."
     if margin < MIN_SAFE_MARGIN and level == "ok" and mode != "bandeau":
         level, msg = "moyen", "Marge trop faible : cheveux, oreilles ou menton peuvent dépasser. Augmente la marge."
+    if video and voice and level == "ok":
+        level, msg = "moyen", ("Visages : anonymat total. Voix déformée : plus reconnaissable à son timbre, mais "
+                               "l'accent, le rythme et les mots prononcés (noms, lieux) restent. Pour un anonymat "
+                               "total, choisis « Son supprimé ».")
     return level, msg
 
 
@@ -243,6 +265,8 @@ def output_ext(src: str) -> str:
         return ext
     if ext in (".heic", ".heif"):
         return ".jpg"
+    if ext in VIDEO_EXTS:
+        return ".mp4"
     return ".png"  # png, tif, bmp, gif -> png (sans perte)
 
 
@@ -327,7 +351,7 @@ def is_output_file(path: str) -> bool:
 
 
 def scan_images(folder: str, exclude_dirs: list[str] | None = None) -> tuple[list[str], int]:
-    """Images d'un dossier (récursif) -> (fichiers, nb de sorties du programme ignorées)."""
+    """Photos et vidéos d'un dossier (récursif) -> (fichiers, nb de sorties du programme ignorées)."""
     excl = {os.path.normcase(os.path.abspath(d)) for d in (exclude_dirs or [])}
     res, skipped = [], 0
     for root, dirs, files in os.walk(folder):
@@ -335,7 +359,7 @@ def scan_images(folder: str, exclude_dirs: list[str] | None = None) -> tuple[lis
         for d in dirs:
             full = os.path.join(root, d)
             if d.lower() == OUTPUT_FOLDER or os.path.normcase(os.path.abspath(full)) in excl:
-                skipped += sum(os.path.splitext(f)[1].lower() in IMAGE_EXTS
+                skipped += sum(os.path.splitext(f)[1].lower() in MEDIA_EXTS
                                for _, _, fs in os.walk(full) for f in fs)
             else:
                 kept.append(d)
@@ -344,7 +368,7 @@ def scan_images(folder: str, exclude_dirs: list[str] | None = None) -> tuple[lis
             continue
         for f in sorted(files):
             p = os.path.join(root, f)
-            if os.path.splitext(f)[1].lower() in IMAGE_EXTS:
+            if os.path.splitext(f)[1].lower() in MEDIA_EXTS:
                 if is_output_file(p):
                     skipped += 1
                 else:
@@ -443,13 +467,13 @@ class FaceDetector:
                  "haarcascade_profileface.xml": (1.0, 0.8)}
 
     # -- YuNet, multi-échelle pour attraper petits ET grands visages ----------
-    def _yunet_candidates(self, rgb: np.ndarray) -> list[Box]:
+    def _yunet_candidates(self, rgb: np.ndarray, sizes: tuple[int, ...] = (640, 1280, 2560)) -> list[Box]:
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         h, w = bgr.shape[:2]
         self._yunet.setScoreThreshold(self.CANDIDATE_FLOOR)
         boxes: list[Box] = []
         long_side = max(h, w)
-        for t in sorted({min(long_side, t) for t in (640, 1280, 2560)}):
+        for t in sorted({min(long_side, t) for t in sizes}):
             s = t / long_side
             img = bgr if s >= 1 else cv2.resize(bgr, (max(1, int(w * s)), max(1, int(h * s))),
                                                 interpolation=cv2.INTER_AREA)
@@ -465,10 +489,10 @@ class FaceDetector:
         return boxes
 
     # -- Haar (secours), de face + de profil des deux côtés -------------------
-    def _haar_candidates(self, rgb: np.ndarray) -> list[Box]:
+    def _haar_candidates(self, rgb: np.ndarray, max_side: int = 1600) -> list[Box]:
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         h, w = gray.shape
-        s = min(1.0, 1600 / max(h, w))
+        s = min(1.0, max_side / max(h, w))
         if s < 1:
             gray = cv2.resize(gray, (max(1, int(w * s)), max(1, int(h * s))), interpolation=cv2.INTER_AREA)
         if min(gray.shape) < 20:
@@ -488,12 +512,13 @@ class FaceDetector:
                     boxes.append(Box(int(x / s), int(y / s), int(fw / s), int(fh / s), score))
         return boxes
 
-    def candidates(self, rgb: np.ndarray) -> list[Box]:
-        """Toutes les détections possibles (même peu sûres), avec leur score, non fusionnées."""
+    def candidates(self, rgb: np.ndarray, fast: bool = False) -> list[Box]:
+        """Toutes les détections possibles (même peu sûres), avec leur score, non fusionnées.
+        `fast` : moins d'échelles (vidéo : des milliers d'images à analyser)."""
         if self._yunet is not None:
-            boxes = self._yunet_candidates(rgb)
+            boxes = self._yunet_candidates(rgb, (640, 1280) if fast else (640, 1280, 2560))
         elif self._cascades:
-            boxes = self._haar_candidates(rgb)
+            boxes = self._haar_candidates(rgb, 960 if fast else 1600)
         else:
             boxes = []
         H, W = rgb.shape[:2]

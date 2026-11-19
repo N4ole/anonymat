@@ -48,7 +48,13 @@ jobs:
           path: models/face_detection_yunet_2023mar.onnx
           key: yunet-2023mar-8f2383e4
 
-      - name: Modèle IA YuNet (empreinte SHA-256 vérifiée, échec si absent)
+      - name: Cache de ffmpeg (son des vidéos)
+        uses: actions/cache@v6
+        with:
+          path: ffmpeg/ffmpeg.exe
+          key: ffmpeg-${{ hashFiles('tools_model.py') }}
+
+      - name: Modèle IA YuNet et ffmpeg (empreintes SHA-256 vérifiées, échec si absents)
         run: python tools_model.py
 
       - name: Tests
@@ -65,7 +71,7 @@ jobs:
           New-Item -ItemType Directory -Force $d | Out-Null
           Copy-Item dist\AnonymiseurVisages.exe $d
           $log = "$env:RUNNER_TEMP\selftest.txt"
-          $p = Start-Process -FilePath "$d\AnonymiseurVisages.exe" -ArgumentList "--selftest","--require-ai","--log",$log -Wait -PassThru
+          $p = Start-Process -FilePath "$d\AnonymiseurVisages.exe" -ArgumentList "--selftest","--require-ai","--require-ffmpeg","--log",$log -Wait -PassThru
           Get-Content $log
           if ($p.ExitCode -ne 0) { throw "Auto-test en échec" }
           if (-not (Select-String -Path $log -SimpleMatch "version=$v")) { throw "Version incorrecte dans le .exe" }

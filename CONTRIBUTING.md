@@ -6,7 +6,7 @@
 py -3.12 -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt ruff==0.17.5
-python tools_model.py        # modèle IA YuNet (empreinte vérifiée)
+python tools_model.py        # modèle IA YuNet + ffmpeg (empreintes vérifiées)
 python app.py                # lancer l'appli sans compiler
 ```
 
