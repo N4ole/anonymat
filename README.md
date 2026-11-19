@@ -111,14 +111,14 @@ Pourquoi pas un vrai ré-entraînement du réseau de neurones ? Il faudrait cons
 
 Sur ton PC (Python 3.10+) : double-clic sur `build.bat`. Le script :
 1. installe les dépendances (versions figées) ;
-2. télécharge le modèle d'IA **YuNet** et **vérifie son empreinte SHA-256**. Un fichier modifié est refusé ; sans modèle, il demande confirmation ;
+2. télécharge le modèle d'IA **YuNet** et **ffmpeg** (son des vidéos) et **vérifie leur empreinte SHA-256**. Un fichier modifié est refusé ; sans modèle IA, il demande confirmation ; sans ffmpeg, il s'arrête ;
 3. lance les tests ;
 4. compile `dist\AnonymiseurVisages.exe` ;
 5. lance l'auto-test du `.exe`, et s'arrête s'il échoue.
 
 Si le téléchargement est bloqué, place `face_detection_yunet_2023mar.onnx` (OpenCV Zoo) dans `models\` à la main ; il sera vérifié de la même façon.
 
-**Voix déformée** : `ffmpeg.exe` est une build minimale compilée sous Linux par la CI ([`build_ffmpeg.sh`](.github/scripts/build_ffmpeg.sh)). Pour l'inclure dans une compilation locale, télécharge l'artefact `ffmpeg-windows` d'une exécution de la CI (onglet *Actions*) et décompresse-le dans `ffmpeg\`. Sans lui, le programme fonctionne, mais le son des vidéos est toujours supprimé.
+**ffmpeg** : build minimale (son seulement, LGPL-2.1) compilée sous Linux par la CI de ce dépôt ([`build_ffmpeg.sh`](.github/scripts/build_ffmpeg.sh), workflow *ffmpeg*) et publiée dans une pré-release figée (`ffmpeg-9.0.2-1`, jamais marquée « dernière version »), d'où `tools_model.py` la télécharge. Elle est toujours embarquée dans le `.exe`.
 
 ### Automatisation GitHub
 

@@ -17,39 +17,8 @@ permissions:
   contents: read
 
 jobs:
-  ffmpeg:
-    name: ffmpeg minimal (LGPL)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref }}
-
-      - name: Cache (recompilé seulement si le script change)
-        id: cache
-        uses: actions/cache@v6
-        with:
-          path: ffmpeg-out
-          key: ffmpeg-${{ hashFiles('.github/scripts/build_ffmpeg.sh') }}
-
-      - name: Compiler ffmpeg.exe (sources officielles, empreinte vérifiée)
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-mingw-w64-x86-64 make pkg-config > /dev/null
-          bash .github/scripts/build_ffmpeg.sh ffmpeg-out
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ffmpeg-windows
-          path: ffmpeg-out/
-          if-no-files-found: error
-          retention-days: 7
-
   build:
     name: Compiler le .exe
-    needs: ffmpeg
     runs-on: windows-latest
     timeout-minutes: 30
     outputs:
@@ -79,14 +48,14 @@ jobs:
           path: models/face_detection_yunet_2023mar.onnx
           key: yunet-2023mar-8f2383e4
 
-      - name: Modèle IA YuNet (empreinte SHA-256 vérifiée, échec si absent)
-        run: python tools_model.py
-
-      - name: ffmpeg minimal (voix déformée des vidéos)
-        uses: actions/download-artifact@v8
+      - name: Cache de ffmpeg (son des vidéos)
+        uses: actions/cache@v6
         with:
-          name: ffmpeg-windows
-          path: ffmpeg
+          path: ffmpeg/ffmpeg.exe
+          key: ffmpeg-${{ hashFiles('tools_model.py') }}
+
+      - name: Modèle IA YuNet et ffmpeg (empreintes SHA-256 vérifiées, échec si absents)
+        run: python tools_model.py
 
       - name: Tests
         run: python -m pytest

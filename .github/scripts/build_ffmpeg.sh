@@ -7,9 +7,11 @@
 # vidéo : licence LGPL-2.1 (le script échoue si la configuration devient GPL ou nonfree).
 #
 # Usage : build_ffmpeg.sh <dossier de sortie>   -> <dossier>/ffmpeg.exe, ffmpeg.exe.sha256
+# Lancé par .github/workflows/ffmpeg.yml, qui publie le résultat dans une pré-release figée.
 set -euo pipefail
 
 VERSION=9.0.2
+REVISION=1          # à augmenter pour republier une build (nouvelle pré-release ffmpeg-VERSION-REVISION)
 SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
 OUT=$(realpath -m "${1:?dossier de sortie}")
 WORK=$(mktemp -d)

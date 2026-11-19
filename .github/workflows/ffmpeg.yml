@@ -1,0 +1,76 @@
+# Compile ffmpeg.exe MINIMAL (son des vidéos, LGPL-2.1) depuis les sources officielles et le
+# publie dans une pré-release figée « ffmpeg-<version>-<révision> », jamais marquée « latest ».
+# tools_model.py (build.bat et la CI) le télécharge ensuite en vérifiant son empreinte figée.
+#
+# Une pré-release publiée n'est jamais remplacée : pour reconstruire, augmenter REVISION
+# dans .github/scripts/build_ffmpeg.sh, puis reporter étiquette et empreinte dans tools_model.py.
+name: ffmpeg
+
+on:
+  push:
+    paths: [.github/scripts/build_ffmpeg.sh, .github/workflows/ffmpeg.yml]
+  workflow_dispatch:
+
+concurrency:
+  group: ffmpeg
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Compiler et publier ffmpeg.exe
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write       # créer la pré-release
+      id-token: write       # attestation de provenance
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Étiquette
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          s=.github/scripts/build_ffmpeg.sh
+          tag="ffmpeg-$(grep -oP '^VERSION=\K\S+' $s)-$(grep -oP '^REVISION=\K\S+' $s)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$tag est déjà publié : rien à faire (augmenter REVISION pour reconstruire)."
+          fi
+
+      - name: Compiler (sources officielles, empreinte vérifiée, garde-fou licence)
+        if: steps.tag.outputs.exists != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64 make pkg-config > /dev/null
+          bash .github/scripts/build_ffmpeg.sh out
+
+      - name: Attestation de provenance
+        if: steps.tag.outputs.exists != 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: out/ffmpeg.exe
+
+      - name: Publier la pré-release
+        if: steps.tag.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          sha=$(cat out/ffmpeg.exe.sha256)
+          {
+            echo "ffmpeg.exe **minimal** pour Anonymat (son des vidéos : voix déformée), compilé par la CI"
+            echo "depuis les sources officielles de FFmpeg avec [build_ffmpeg.sh]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/.github/scripts/build_ffmpeg.sh)."
+            echo "Licence LGPL-2.1 (aucun composant GPL ni nonfree). Ce n'est pas une version de l'application."
+            echo
+            echo "SHA-256 de ffmpeg.exe : \`$sha\`"
+          } > notes.md
+          gh release create "$TAG" out/ffmpeg.exe out/ffmpeg.exe.sha256 out/LICENSE-ffmpeg.txt \
+            -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Composant ffmpeg $TAG" --notes-file notes.md
+          echo "::notice::$TAG publié. Empreinte à reporter dans tools_model.py : $sha"

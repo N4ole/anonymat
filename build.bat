@@ -24,17 +24,20 @@ echo [2/5] Installation des dependances (versions figees)...
 "%VPY%" -m pip install --upgrade pip >nul
 "%VPY%" -m pip install -r requirements.txt || goto :err
 
-echo [3/5] Modele de detection IA YuNet (telechargement + verification SHA-256)...
-"%VPY%" tools_model.py
+echo [3/5] Composants embarques (telechargement + verification SHA-256)...
+"%VPY%" tools_model.py yunet
 if errorlevel 1 (
     echo.
     echo   ! Modele IA indisponible : le .exe utiliserait la detection BASIQUE, qui rate plus de visages.
     choice /M "  Compiler quand meme"
     if errorlevel 2 goto :err
 )
-if not exist ffmpeg\ffmpeg.exe (
-    echo   i ffmpeg absent : le son des videos sera toujours supprime ^(voix deformee indisponible^).
-    echo     Voir README, section "Compiler soi-meme".
+"%VPY%" tools_model.py ffmpeg
+if errorlevel 1 (
+    echo.
+    echo   ! ffmpeg indisponible ^(son des videos, voix deformee^) : compilation arretee.
+    echo     Verifie la connexion Internet, ou voir README, section "Compiler soi-meme".
+    goto :err
 )
 
 echo [4/5] Tests automatiques...
