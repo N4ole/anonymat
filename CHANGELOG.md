@@ -10,7 +10,8 @@ Chaque section `## [X.Y.Z]` sert de notes à la release correspondante.
 - **Passages à risque** : « Suivante ▶ » emmène à chaque moment où un visage a pu échapper à la détection (visage perdu puis retrouvé, détection peu sûre, apparition ou disparition au milieu de l'image) avant de valider la vidéo.
 - Zones manuelles sur une plage de temps : « 📍 Replacer ici » (déplacement interpolé), « ⏮ Début ici », « Fin ici ⏭ ».
 - Réglage *Analyse des vidéos* : auto, précise (10 analyses par seconde) ou rapide (4 par seconde).
-- **Son des vidéos** : supprimé (par défaut) ou **voix déformée** (voix chuchotée, timbre changé au hasard), avec un bouton pour écouter un extrait.
+- **Son des vidéos** : supprimé (par défaut) ou **voix déformée**, avec des réglages combinables : chuchotée, robot, timbre (au hasard, plus grave, plus aigu), décalage fort, effet téléphone.
+- **La lecture joue le son**, calé sur l'image : tel qu'il sera enregistré (*Voir le résultat*), ou l'original.
 
 ### Sécurité
 - Suivi avec hystérésis (un visage repéré reste suivi même quand il devient difficile à voir), prolongé vers l'arrière ; entre deux analyses, la zone couvre les deux positions ; trous de moins d'une seconde comblés ; chaque visage est caché un peu avant et après ses détections.

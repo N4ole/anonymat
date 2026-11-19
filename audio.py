@@ -23,6 +23,7 @@ import hashlib
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -43,14 +44,48 @@ def _smooth(v: np.ndarray, n: int) -> np.ndarray:
     return np.convolve(np.pad(v, (n // 2, n - 1 - n // 2), mode="edge"), k, mode="valid")
 
 
-def pick_shift(rng: np.random.Generator) -> float:
-    """Facteur de décalage des formants : nettement plus grave OU plus aigu, au hasard."""
-    return rng.uniform(0.80, 0.87) if rng.random() < 0.5 else rng.uniform(1.15, 1.25)
+@dataclass(frozen=True)
+class VoiceOptions:
+    """Réglages de la voix déformée (combinables). Au moins une des deux premières est
+    obligatoire : ce sont elles qui DÉTRUISENT la hauteur de la voix d'origine."""
+
+    chuchote: bool = True       # cordes vocales -> bruit (voix chuchotée)
+    robot: bool = False         # cordes vocales -> bourdonnement à hauteur fixe (sans mélodie)
+    timbre: str = "hasard"      # hasard | grave | aigu
+    fort: bool = False          # décalage du timbre plus marqué
+    telephone: bool = False     # seulement 300-3 400 Hz (moins d'indices sur la personne)
+
+    def check(self) -> None:
+        if not (self.chuchote or self.robot):
+            raise ValueError("choisis au moins « Chuchotée » ou « Robot » (sinon la hauteur de voix reste)")
+        if self.timbre not in TIMBRES:
+            raise ValueError(f"timbre inconnu : {self.timbre}")
+
+
+TIMBRES = {"hasard": "Au hasard", "grave": "Plus grave", "aigu": "Plus aigu"}
+DEFAULT_VOICE = VoiceOptions()
+# Décalage des formants : (grave), (aigu) ; « fort » plus marqué.
+SHIFTS = {False: ((0.80, 0.87), (1.15, 1.25)), True: ((0.66, 0.75), (1.28, 1.40))}
+
+
+def pick_shift(rng: np.random.Generator, opts: VoiceOptions = DEFAULT_VOICE) -> float:
+    """Facteur de décalage des formants : nettement plus grave OU plus aigu."""
+    grave, aigu = SHIFTS[opts.fort]
+    down = rng.random() < 0.5 if opts.timbre == "hasard" else opts.timbre == "grave"
+    return rng.uniform(*(grave if down else aigu))
+
+
+def pick_f0(rng: np.random.Generator) -> float:
+    """Hauteur fixe de la voix robot (Hz), sans rapport avec la voix d'origine."""
+    return rng.uniform(95.0, 135.0)
 
 
 def disguise(x: np.ndarray, sr: int = SR, rng: np.random.Generator | None = None,
-             base: float | None = None) -> np.ndarray:
-    """Voix chuchotée à formants déplacés (mono, flottants -1..1) ; même longueur en sortie."""
+             base: float | None = None, opts: VoiceOptions = DEFAULT_VOICE,
+             f0: float | None = None, offset: int = 0) -> np.ndarray:
+    """Voix déformée (mono, flottants -1..1) ; même longueur en sortie.
+    `offset` : position du morceau dans la piste (voix robot continue d'un morceau à l'autre)."""
+    opts.check()
     rng = rng or np.random.default_rng()  # graine aléatoire : rien de reproductible
     x = np.asarray(x, dtype=np.float64).ravel()
     n = len(x)
@@ -70,8 +105,8 @@ def disguise(x: np.ndarray, sr: int = SR, rng: np.random.Generator | None = None
     cep[:, lift:n_fft - lift + 1] = 0.0
     env = np.exp(np.fft.rfft(cep, axis=1).real)
 
-    # 2. décalage des formants : facteur aléatoire, plus grave ou plus aigu, qui dérive
-    base = pick_shift(rng) if base is None else base
+    # 2. décalage des formants : facteur tiré au hasard, qui dérive
+    base = pick_shift(rng, opts) if base is None else base
     drift = _smooth(rng.standard_normal(T), max(1, int(0.6 * sr / hop)))
     drift = drift / (np.abs(drift).max() + 1e-9) * 0.05
     alpha = base * (1.0 + drift)
@@ -80,9 +115,22 @@ def disguise(x: np.ndarray, sr: int = SR, rng: np.random.Generator | None = None
     fr = np.clip(src - i0, 0.0, 1.0)
     rows = np.arange(T)[:, None]
     env_w = env[rows, i0] * (1 - fr) + env[rows, i0 + 1] * fr
+    if opts.telephone:
+        f = np.fft.rfftfreq(n_fft, 1 / sr)
+        band = np.clip((f - 200) / 100, 0, 1) * np.clip((3600 - f) / 200, 0, 1)
+        env_w = env_w * band[None, :]
 
-    # 3. excitation = bruit (phase aléatoire) ; même énergie que l'original, image par image
-    Y = env_w * np.exp(1j * rng.uniform(0, 2 * np.pi, (T, F)))
+    # 3. nouvelle excitation (la vibration d'origine est jetée) ; même énergie, image par image
+    E = np.zeros((T, F), complex)
+    if opts.chuchote:
+        E += np.exp(1j * rng.uniform(0, 2 * np.pi, (T, F)))
+    if opts.robot:
+        period = sr / (pick_f0(rng) if f0 is None else f0)
+        k = np.arange(len(xp)) + offset - n_fft
+        pulses = (np.diff(np.floor(k / period), prepend=np.floor((k[0] - 1) / period)) > 0).astype(float)
+        P = np.fft.rfft(np.lib.stride_tricks.sliding_window_view(pulses, n_fft)[::hop] * win, axis=1)
+        E += P / (np.sqrt((np.abs(P) ** 2).mean(1, keepdims=True)) + 1e-9)
+    Y = env_w * E
     e_in = (np.abs(X) ** 2).sum(1)
     e_out = (np.abs(Y) ** 2).sum(1) + 1e-12
     gain = _smooth(np.sqrt(e_in / e_out), 3)
@@ -104,20 +152,22 @@ def disguise(x: np.ndarray, sr: int = SR, rng: np.random.Generator | None = None
 
 
 def disguise_long(x: np.ndarray, sr: int = SR, rng: np.random.Generator | None = None,
-                  chunk_s: float = 30.0, fade_s: float = 0.25) -> np.ndarray:
-    """Comme `disguise`, par tranches (mémoire bornée pour les longues vidéos), même timbre partout,
-    avec un fondu enchaîné entre deux tranches."""
+                  opts: VoiceOptions = DEFAULT_VOICE, chunk_s: float = 30.0, fade_s: float = 0.25) -> np.ndarray:
+    """Comme `disguise`, par tranches (mémoire bornée pour les longues vidéos), même timbre
+    et même hauteur robot partout, avec un fondu enchaîné entre deux tranches.
+    Avec la même graine (`rng`), le résultat est identique : l'aperçu = l'export."""
+    opts.check()
     rng = rng or np.random.default_rng()
     x = np.asarray(x, dtype=np.float32).ravel()
+    base, f0 = pick_shift(rng, opts), pick_f0(rng)
     chunk, fade = int(chunk_s * sr), int(fade_s * sr)
     if len(x) <= chunk + fade:
-        return disguise(x, sr, rng)
-    base = pick_shift(rng)
+        return disguise(x, sr, rng, base, opts, f0)
     out = np.zeros(len(x), np.float32)
     ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
     for s in range(0, len(x), chunk):
         a, b = max(0, s - fade), min(len(x), s + chunk)
-        y = disguise(x[a:b], sr, rng, base)
+        y = disguise(x[a:b], sr, rng, base, opts, f0, offset=a)
         if a < s:  # fondu avec la fin de la tranche précédente
             y[:fade] *= ramp
             out[a:s] *= ramp[::-1]

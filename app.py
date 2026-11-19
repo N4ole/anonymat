@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import numpy as np
 from PIL import Image, ImageTk
 
 import audio
@@ -134,6 +136,10 @@ class Item:
         self.progress = 0.0
         self.gen = 0                                # change = analyse en cours abandonnée
         self.cancelled = False
+        # son : pistes calculées (clé « orig » ou réglages de voix), graine partagée aperçu / export
+        self.audio: dict[object, np.ndarray] = {}
+        self.no_audio = False
+        self.voice_seed = secrets.randbits(63)      # en mémoire seulement : rien de reproductible ensuite
 
     @property
     def all_tracks(self) -> list[video.Track]:
@@ -275,9 +281,12 @@ class App(tk.Tk):
                               "la personne peut rester reconnaissable (options avancées).")
 
         self.preview = tk.BooleanVar(value=True)
-        cbp = ttk.Checkbutton(top, text="Voir le résultat", variable=self.preview, command=self.redraw)
+        cbp = ttk.Checkbutton(top, text="Voir le résultat", variable=self.preview,
+                              command=lambda: (self._stop_play(), self.redraw()))
         cbp.pack(side="left", padx=10)
-        Tooltip(cbp, "Affiche la photo telle qu'elle sera enregistrée. Les cadres restent visibles par-dessus.")
+        Tooltip(cbp, "Affiche la photo telle qu'elle sera enregistrée. Les cadres restent visibles par-dessus.\n"
+                     "Vidéos : pendant la lecture, on entend aussi le son tel qu'il sera enregistré "
+                     "(décoché : l'original).")
 
         self.advanced = tk.BooleanVar(value=bool(self.cfg.get("advanced", False)))
         self.btn_adv = ttk.Checkbutton(top, text="⚙ Options avancées", variable=self.advanced,
@@ -468,15 +477,37 @@ class App(tk.Tk):
         self.sound_cb.pack(side="left", padx=4)
         self.sound_cb.bind("<<ComboboxSelected>>", lambda e: self._on_sound())
         Tooltip(self.sound_cb, "🔇 Son supprimé : anonymat total (une voix identifie aussi bien qu'un visage).\n"
-                               "🗣 Voix déformée : les paroles restent compréhensibles (voix chuchotée, timbre "
-                               "changé au hasard, impossible à annuler), mais l'accent, le rythme et les mots "
-                               "prononcés (noms, lieux) restent. Vaut pour toutes les vidéos.")
-        self.btn_listen = ttk.Button(snd, text="🔊 Écouter la voix déformée", command=self.listen_voice)
-        self.btn_listen.pack(side="left", padx=4)
-        Tooltip(self.btn_listen, "Joue 8 secondes de voix déformée, à partir de l'image affichée, "
-                                 "pour vérifier qu'on ne reconnaît plus la personne.")
+                               "🗣 Voix déformée : les paroles restent compréhensibles, la voix d'origine ne peut "
+                               "pas être retrouvée, mais l'accent, le rythme et les mots prononcés (noms, lieux) "
+                               "restent. Vaut pour toutes les vidéos. Appuie sur « ▶ Lire » pour l'entendre.")
         self.sound_note = ttk.Label(snd, text="", foreground="#555")
         self.sound_note.pack(side="left", padx=6)
+
+        # Réglages de la voix (visibles seulement en « Voix déformée »)
+        self.voice_frame = ttk.Frame(self.vbar)
+        ttk.Label(self.voice_frame, text="Voix :").pack(side="left")
+        self.v_chuchote = tk.BooleanVar(value=True)
+        self.v_robot = tk.BooleanVar(value=False)
+        self.v_fort = tk.BooleanVar(value=False)
+        self.v_tel = tk.BooleanVar(value=False)
+        self.v_timbre = tk.StringVar(value=audio.TIMBRES["hasard"])
+        for txt, var, tip in (
+                ("Chuchotée", self.v_chuchote, "La vibration des cordes vocales est remplacée par un souffle."),
+                ("Robot", self.v_robot, "La vibration des cordes vocales est remplacée par un bourdonnement à "
+                                        "hauteur fixe : plus aucune mélodie de la voix. Avec « Chuchotée » : "
+                                        "robot chuchoté."),
+                ("Décalage fort", self.v_fort, "Timbre encore plus éloigné de l'original (moins naturel)."),
+                ("Effet téléphone", self.v_tel, "Ne garde que les fréquences d'un téléphone (300 à 3 400 Hz) : "
+                                                "moins d'indices sur la personne.")):
+            cb = ttk.Checkbutton(self.voice_frame, text=txt, variable=var, command=self._on_voice_opts)
+            cb.pack(side="left", padx=(6, 0))
+            Tooltip(cb, tip)
+        ttk.Label(self.voice_frame, text="   Timbre :").pack(side="left")
+        ct = ttk.Combobox(self.voice_frame, textvariable=self.v_timbre, state="readonly", width=11,
+                          values=list(audio.TIMBRES.values()))
+        ct.pack(side="left", padx=4)
+        ct.bind("<<ComboboxSelected>>", lambda e: self._on_voice_opts())
+        Tooltip(ct, "Plus grave ou plus aigu que la voix d'origine (« Au hasard » : tiré au sort par vidéo).")
 
         tools = self.tools = ttk.Frame(right, padding=(0, 4))
         tools.pack(fill="x")
@@ -580,15 +611,28 @@ class App(tk.Tk):
             messagebox.showinfo(APP_NAME, "Mode terrain : le son des vidéos est toujours supprimé."
                                 if self._terrain() else self.ffmpeg.problem)
             self.sound.set(audio.SOUND_MODES["supprimer"])
+        self._stop_play()
         self._update_sound_ui()
         self._on_strength(redraw=False)
         self._update_review()
 
+    def _voice_opts(self) -> audio.VoiceOptions:
+        timbre = next((k for k, v in audio.TIMBRES.items() if v == self.v_timbre.get()), "hasard")
+        return audio.VoiceOptions(self.v_chuchote.get(), self.v_robot.get(), timbre, self.v_fort.get(), self.v_tel.get())
+
+    def _on_voice_opts(self) -> None:
+        if not (self.v_chuchote.get() or self.v_robot.get()):
+            self.v_chuchote.set(True)
+            self.flash_hint("Il faut au moins « Chuchotée » ou « Robot » :\nce sont eux qui effacent la voix d'origine.")
+        self._stop_play()
+
     def _update_sound_ui(self) -> None:
         if self._sound() != "voix" and self.sound.get() == audio.SOUND_MODES["voix"]:
             self.sound.set(audio.SOUND_MODES["supprimer"])
-        voice = self._sound() == "voix"
-        self.btn_listen.state(["!disabled"] if voice and sys.platform == "win32" else ["disabled"])
+        if self._sound() == "voix":
+            self.voice_frame.pack(fill="x", pady=(2, 0))
+        else:
+            self.voice_frame.pack_forget()
         note = ""
         if self._terrain():
             note = "(mode terrain : son toujours supprimé)"
@@ -901,8 +945,8 @@ class App(tk.Tk):
                     continue
                 if it not in self.items:
                     continue
-                if kind == "listen":
-                    self._play_listen(data)
+                if kind == "audio":
+                    self._audio_ready(it, data)
                     continue
                 if kind == "probe":
                     box, score, (W, H) = data
@@ -1378,7 +1422,7 @@ class App(tk.Tk):
                                            "ou désactive le mode terrain en connaissance de cause.")
             return
         mode, shape, margin, strength = self._mode_key(), self._shape(), self._margin(), self._strength()
-        sound = self._sound()
+        sound, voice = self._sound(), self._voice_opts()
         level, msg = core.safety(mode, strength, margin, self._has_video(), sound == "voix")
         if level != "ok" and not messagebox.askyesno(
                 APP_NAME, "⚠ Ce réglage ne garantit PAS l'anonymat :\n\n" + msg +
@@ -1451,7 +1495,8 @@ class App(tk.Tk):
                         if it.is_video:
                             video.export(it.path, dst, boxes, mode, shape, margin, strength,
                                          progress=lambda fr, n=n: self.results.put(("exp_prog", n - 1 + fr, None)),
-                                         cancel=lambda: self.cancel, sound=sound, ffmpeg=self.ffmpeg)
+                                         cancel=lambda: self.cancel, sound=sound, ffmpeg=self.ffmpeg,
+                                         voice=voice, voice_seed=it.voice_seed)
                         else:
                             rgb, alpha = core.load_image_full(it.path)
                             out = core.anonymize(rgb, boxes, mode, shape, margin, strength=strength)
@@ -1569,43 +1614,121 @@ class App(tk.Tk):
                     self._seek(it.pos)
             self._seek_job = self.after(40, go)
 
+    _play_pending: tuple | None = None
+    _play_t0 = 0.0
+    _play_f0 = 0
+
+    def _wanted_audio(self) -> object | None:
+        """Son à jouer : None (silence), « orig », ou les réglages de voix (= ce qui sera enregistré)."""
+        if not self.ffmpeg.ok or sys.platform != "win32":
+            return None
+        if not self.preview.get():
+            return "orig"
+        return self._voice_opts() if self._sound() == "voix" else None
+
     def toggle_play(self) -> None:
         it = self.current
         if not it or not it.is_video or self.reader is None or it.vinfo is None:
             return
-        if self.playing:
+        if self.playing or self._play_pending:
             self._stop_play()
             return
         if it.pos >= it.vinfo.frames - 1:
             self._seek(0)
+        key = self._wanted_audio()
+        if key is not None and not it.no_audio and key not in it.audio:
+            self._play_pending = (it, key)  # le son est préparé une fois (fil à part), puis gardé
+            self.btn_play.configure(text="⏳ Son…")
+            self.status.configure(text="Préparation du son de la vidéo…")
+            threading.Thread(target=self._prepare_audio, args=(it, key), daemon=True).start()
+            return
+        self._start_play(it, key)
+
+    def _prepare_audio(self, it: Item, key) -> None:
+        try:
+            orig = it.audio.get("orig")
+            if orig is None:
+                orig = self.ffmpeg.extract(it.path)
+            out = None
+            if orig is not None:
+                out = orig if key == "orig" else audio.disguise_long(
+                    orig, rng=np.random.default_rng(it.voice_seed), opts=key)
+            self.results.put(("audio", it, (key, orig, out)))
+        except Exception as exc:
+            self.results.put(("audio", it, (key, exc, None)))
+
+    def _audio_ready(self, it: Item, data) -> None:
+        key, orig, out = data
+        if isinstance(orig, Exception):
+            self.status.configure(text=f"Son illisible : {orig}")
+            it.no_audio = True
+        elif orig is None:
+            it.no_audio = True
+        else:
+            it.audio["orig"], it.audio[key] = orig, out
+        if self._play_pending == (it, key) and it is self.current:
+            self._play_pending = None
+            self._start_play(it, key)
+
+    def _start_play(self, it: Item, key) -> None:
         self.playing = True
         self.btn_play.configure(text="⏸ Pause")
+        self._play_t0, self._play_f0 = time.perf_counter(), it.pos
+        pcm = None if key is None or it.no_audio else it.audio.get(key)
+        if pcm is not None:
+            seg = pcm[int(it.pos / it.vinfo.fps * audio.SR):]
+            if len(seg):
+                import winsound
+                fd, p = tempfile.mkstemp(prefix="anonymat_son_", suffix=".wav")
+                with os.fdopen(fd, "wb") as f:  # supprimé dès l'arrêt de la lecture
+                    f.write(audio.wav_bytes(seg))
+                self._listen_file = p
+                winsound.PlaySound(p, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        if it.no_audio and key is not None:
+            msg = "Cette vidéo n'a pas de son."
+        elif key == "orig":
+            msg = "🔊 Son d'origine (coche « Voir le résultat » pour entendre le son enregistré)."
+        elif key is not None:
+            msg = "🗣 Voix déformée, telle qu'elle sera enregistrée."
+        elif self.ffmpeg.ok and sys.platform == "win32":
+            msg = "🔇 Son supprimé dans le résultat (décoche « Voir le résultat » pour entendre l'original)."
+        else:
+            msg = "Lecture sans le son."
+        self.status.configure(text=msg)
         self._play_tick()
 
     def _stop_play(self) -> None:
         self.playing = False
+        self._play_pending = None
+        self._cleanup_listen()
         try:
             self.btn_play.configure(text="▶ Lire")
         except (AttributeError, tk.TclError):
             pass  # fenêtre pas encore construite ou déjà détruite
 
     def _play_tick(self) -> None:
+        """Lecture calée sur l'horloge (donc sur le son) : en retard, on saute des images."""
         it = self.current
         if not self.playing or not it or not it.is_video or self.reader is None or it.vinfo is None:
             self._stop_play()
             return
-        t0 = time.perf_counter()
-        fr = self.reader.frame(it.pos + 1) if it.pos + 1 < it.vinfo.frames else None
-        if fr is None:
+        fps = it.vinfo.fps
+        target = self._play_f0 + int((time.perf_counter() - self._play_t0) * fps)
+        if target >= it.vinfo.frames:
             self._stop_play()
             return
-        it.pos += 1
-        self.proxy = fr
-        self.redraw()
-        if self.cur_risk is not None:
-            self._update_review()
-        spent = (time.perf_counter() - t0) * 1000
-        self.after(max(1, int(1000 / it.vinfo.fps - spent)), self._play_tick)
+        if target > it.pos:
+            fr = self.reader.frame(target)
+            if fr is None:
+                self._stop_play()
+                return
+            it.pos = target
+            self.proxy = fr
+            self.redraw()
+            if self.cur_risk is not None:
+                self._update_review()
+        nxt = self._play_t0 + (it.pos + 1 - self._play_f0) / fps
+        self.after(max(1, int((nxt - time.perf_counter()) * 1000)), self._play_tick)
 
     def goto_risk(self, any_risk: bool = False) -> bool:
         """Va au prochain passage à risque (non vu, sauf `any_risk`) ; False s'il n'y en a plus."""
@@ -1623,44 +1746,6 @@ class App(tk.Tk):
         self._refresh_row(it)
         self._seek(r.frame)
         return True
-
-    def listen_voice(self) -> None:
-        """Extrait de 8 s de voix déformée (fil à part : ffmpeg + calcul), joué par Windows."""
-        it = self.current
-        if not it or not it.is_video or not it.vinfo or self._sound() != "voix" or sys.platform != "win32":
-            return
-        self.btn_listen.state(["disabled"])
-        self.status.configure(text="Préparation de l'extrait de voix déformée…")
-        start = it.pos / it.vinfo.fps
-
-        def run() -> None:
-            try:
-                pcm = self.ffmpeg.extract(it.path, start=start, duration=8.0)
-                if pcm is None or not len(pcm):
-                    self.results.put(("listen", it, None))
-                    return
-                fd, p = tempfile.mkstemp(prefix="voix_deformee_", suffix=".wav")
-                with os.fdopen(fd, "wb") as f:  # seulement la voix DÉFORMÉE, supprimée ensuite
-                    f.write(audio.wav_bytes(audio.disguise(pcm)))
-                self.results.put(("listen", it, p))
-            except Exception as exc:
-                self.results.put(("listen", it, exc))
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _play_listen(self, data) -> None:
-        self._update_sound_ui()
-        if data is None:
-            self.status.configure(text="Pas de son à cet endroit de la vidéo.")
-            return
-        if isinstance(data, Exception):
-            self.status.configure(text=f"Extrait impossible : {data}")
-            return
-        import winsound
-        self._cleanup_listen()
-        self._listen_file = data
-        winsound.PlaySound(data, winsound.SND_FILENAME | winsound.SND_ASYNC)
-        self.status.configure(text="🔊 8 s de voix déformée, à partir de l'image affichée.")
 
     def _cleanup_listen(self) -> None:
         if not self._listen_file:

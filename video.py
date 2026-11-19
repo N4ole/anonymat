@@ -104,7 +104,11 @@ class Reader:
     def frame(self, idx: int) -> np.ndarray | None:
         if idx == self.pos and self.last is not None:
             return self.last
-        if idx != self.pos + 1:
+        if self.pos < idx <= self.pos + 15:  # petit saut en avant (lecture en retard) : on passe les images
+            for _ in range(idx - self.pos - 1):
+                if not self.cap.grab():
+                    return None
+        elif idx != self.pos + 1:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ok, bgr = self.cap.read()
         if not ok:
@@ -358,17 +362,20 @@ def export(src: str, dst: str, tracks: list[Track], mode: str = "flou", shape: s
            margin: float = 0.3, strength: float = core.SIMPLE_STRENGTH,
            progress: Callable[[float], None] | None = None,
            cancel: Callable[[], bool] | None = None,
-           sound: str = "supprimer", ffmpeg: audio.Ffmpeg | None = None) -> int:
+           sound: str = "supprimer", ffmpeg: audio.Ffmpeg | None = None,
+           voice: audio.VoiceOptions = audio.DEFAULT_VOICE, voice_seed: int | None = None) -> int:
     """Réécrit la vidéo image par image (sans métadonnées), de façon atomique.
-    `sound` : « supprimer » (défaut, le plus sûr) ou « voix » (voix déformée, via ffmpeg).
+    `sound` : « supprimer » (défaut, le plus sûr) ou « voix » (voix déformée selon `voice`, via ffmpeg).
+    `voice_seed` : graine du tirage aléatoire, partagée avec l'aperçu (jamais enregistrée).
     Renvoie le nombre d'images écrites."""
     pcm = None
     if sound == "voix":
+        voice.check()
         if ffmpeg is None or not ffmpeg.ok:
             raise OSError("voix déformée impossible : " + (ffmpeg.problem if ffmpeg else "ffmpeg indisponible"))
         orig = ffmpeg.extract(src)
         if orig is not None:  # vidéo sans son : rien à déformer
-            pcm = audio.disguise_long(orig)
+            pcm = audio.disguise_long(orig, rng=np.random.default_rng(voice_seed), opts=voice)
         del orig
     cap = open_capture(src)
     total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))

@@ -189,3 +189,57 @@ def test_voix_deformee_jamais_verte(mode):
     assert core.safety(mode, core.SIMPLE_STRENGTH, 0.3, video=True)[0] == "ok"
     level, msg = core.safety(mode, core.SIMPLE_STRENGTH, 0.3, video=True, voice=True)
     assert level == "moyen" and "Son supprimé" in msg
+
+
+# ---------------------------------------------------------------- options --
+def hauteur(x, sr=SR):
+    """Hauteur dominante (Hz) par autocorrélation sur toute la piste."""
+    x = x - x.mean()
+    ac = np.correlate(x[:sr // 2], x[:sr // 2], "full")[sr // 2 - 1:]
+    lo, hi = int(sr / 400), int(sr / 70)
+    return sr / (lo + int(np.argmax(ac[lo:hi])))
+
+
+def test_robot_hauteur_fixe_sans_rapport_avec_la_voix():
+    """Voix robot : deux voix de hauteurs différentes donnent la MÊME hauteur (mélodie détruite)."""
+    opts = audio.VoiceOptions(chuchote=False, robot=True)
+    grave = audio.disguise_long(voyelle(f0=110), rng=np.random.default_rng(3), opts=opts)
+    aigue = audio.disguise_long(voyelle(f0=210), rng=np.random.default_rng(3), opts=opts)
+    assert abs(hauteur(grave) - hauteur(aigue)) < 3
+    assert 90 < hauteur(grave) < 140
+
+
+def test_robot_et_chuchote_combinables():
+    y = audio.disguise(VOIX, opts=audio.VoiceOptions(chuchote=True, robot=True))
+    assert np.isfinite(y).all() and len(y) == len(VOIX)
+
+
+def test_aucune_excitation_refusee():
+    with pytest.raises(ValueError):
+        audio.disguise(VOIX, opts=audio.VoiceOptions(chuchote=False, robot=False))
+
+
+def test_effet_telephone_coupe_les_aigus():
+    y = audio.disguise(VOIX, opts=audio.VoiceOptions(telephone=True))
+    spec = np.abs(np.fft.rfft(y)) ** 2
+    f = np.fft.rfftfreq(len(y), 1 / SR)
+    assert spec[f > 4000].sum() < 0.02 * spec.sum()
+    assert spec[f < 150].sum() < 0.02 * spec.sum()
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_timbre_grave_aigu_et_fort(seed):
+    def ratio(**kw):
+        y = audio.disguise(VOIX, rng=np.random.default_rng(seed), opts=audio.VoiceOptions(**kw))
+        return centroide(y) / centroide(VOIX)
+    assert ratio(timbre="grave") < 0.92 and ratio(timbre="aigu") > 1.08
+    assert ratio(timbre="grave", fort=True) < ratio(timbre="grave")
+    assert ratio(timbre="aigu", fort=True) > ratio(timbre="aigu")
+
+
+def test_meme_graine_meme_son():
+    """L'aperçu et l'export partagent une graine (gardée en mémoire seulement) : même résultat."""
+    x = np.tile(VOIX, 3)
+    a = audio.disguise_long(x, rng=np.random.default_rng(9), chunk_s=1.0, fade_s=0.1)
+    b = audio.disguise_long(x, rng=np.random.default_rng(9), chunk_s=1.0, fade_s=0.1)
+    assert np.array_equal(a, b)

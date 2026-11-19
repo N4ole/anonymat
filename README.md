@@ -59,7 +59,18 @@ Une vidéo s'ajoute comme une photo. Elle est d'abord **analysée** (barre de pr
 - La vidéo est réécrite image par image en **MP4**, sans aucune métadonnée.
 - **Son de la vidéo** (sous le lecteur) :
   - 🔇 **Son supprimé** (par défaut, et toujours en mode terrain) : anonymat total, une voix identifie aussi bien qu'un visage ;
-  - 🗣 **Voix déformée** : les paroles restent compréhensibles, mais la voix devient chuchotée, avec un timbre changé au hasard (plus grave ou plus aigu, et qui varie). La hauteur et la mélodie de la voix sont **détruites**, pas seulement transformées : on ne peut pas revenir à l'original. `🔊 Écouter la voix déformée` joue 8 secondes à partir de l'image affichée. Le bandeau reste **orange** : l'accent, le rythme et les mots prononcés (noms, lieux) restent, comme les bruits de fond.
+  - 🗣 **Voix déformée** : les paroles restent compréhensibles, mais la hauteur et la mélodie de la voix sont **détruites**, pas seulement transformées : on ne peut pas revenir à l'original. Le bandeau reste **orange** : l'accent, le rythme et les mots prononcés (noms, lieux) restent, comme les bruits de fond. Réglages, combinables :
+
+    | Réglage | Effet |
+    |---|---|
+    | **Chuchotée** (par défaut) | les cordes vocales sont remplacées par un souffle |
+    | **Robot** | elles sont remplacées par un bourdonnement à hauteur fixe ; avec « Chuchotée » : robot chuchoté |
+    | **Timbre** : au hasard, plus grave, plus aigu | décalage du timbre (13 à 25 %), qui varie en plus au fil du temps |
+    | **Décalage fort** | décalage de 25 à 40 %, moins naturel |
+    | **Effet téléphone** | seulement 300 à 3 400 Hz : moins d'indices sur la personne |
+
+    Il faut au moins « Chuchotée » ou « Robot » : ce sont eux qui effacent la voix d'origine.
+- **▶ Lire joue aussi le son** : avec *Voir le résultat* coché, tel qu'il sera enregistré (voix déformée, ou rien si le son est supprimé) ; décoché, le son d'origine. L'image reste calée sur le son. Le son déformé entendu est exactement celui qui sera enregistré.
 
 Comment aucun visage n'échappe au suivi :
 - le détecteur analyse 10 images par seconde de film (4 pour les vidéos de plus de 3 minutes ; réglable dans ⚙ *Analyse des vidéos*) ;
