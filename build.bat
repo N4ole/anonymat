@@ -44,6 +44,10 @@ echo [4/5] Tests automatiques...
 "%VPY%" -m pytest -q tests || goto :err
 
 echo [5/5] Compilation avec PyInstaller...
+tasklist /FI "IMAGENAME eq AnonymiseurVisages.exe" 2>nul | find /I "AnonymiseurVisages.exe" >nul && (
+    echo   ! Le programme est ouvert : ferme toutes ses fenetres, puis relance build.bat.
+    goto :err
+)
 rem Dossier de travail hors de OneDrive : la synchronisation verrouille les fichiers temporaires.
 set WORK=%LOCALAPPDATA%\AnonymiseurVisages\build
 "%VPY%" -m PyInstaller --noconfirm --clean --workpath "%WORK%" AnonymiseurVisages.spec || goto :err
